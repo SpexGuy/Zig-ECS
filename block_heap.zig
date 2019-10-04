@@ -16,18 +16,32 @@ comptime {
     assert(util.isPowerOfTwo(chunk_size));
 }
 
-pub const RefrigeratorAllocator = struct {
+pub const BlockAllocator = struct {
     const Self = @This();
 
     blockSize: u32,
+    dataPageNumBitmaskLongs: u32,
     dataPageSlots: u32,
     firstHeader: ?*IndexPageHeader = null,
 
-    pub fn init(size: u32) RefrigeratorAllocator {
+    pub fn init(size: u32) Self {
+        comptime {
+            assert(@alignOf(DataPageHeader) == @alignOf(DataPageMask));
+        }
         assert(util.isPowerOfTwo(size));
-        return RefrigeratorAllocator{
+        assert(size >= 8);
+
+        // this isn't perfect but it should be close enough.
+        const maxChunkSize = chunk_size - @sizeOf(DataPageHeader) - @sizeOf(DataPageMask);
+        const maxNumBlocks = maxChunkSize / size;
+        const numBitmasks = (maxNumBlocks + 63) / 64;
+        const chunkSize = chunk_size - @sizeOf(DataPageHeader) - numBitmasks * @sizeOf(DataPageMask);
+        const numBlocks = chunkSize / size;
+
+        return Self{
             .blockSize = size,
-            .dataPageSlots = page_size / size,
+            .dataPageNumBitmaskLongs = numBitmasks,
+            .dataPageSlots = numBlocks,
         };
     }
 
@@ -52,21 +66,22 @@ pub const RefrigeratorAllocator = struct {
         for (freeSlotsArray[0..inUse]) |numFreeSlots, i| {
             if (numFreeSlots > 0) {
                 const dataPage = page.getValues(.Data)[i];
-                freeSlotsArray[i] -= 1;
-                return self.allocFromDataPage(dataPage);
+                // allocFromDataPage updates freeSlotsArray
+                return self.allocFromDataPageMustBeFree(dataPage);
             }
         }
         // all used data pages are full, can we make a new one?
         const numSlots = IndexPage.layout.numItems;
         if (inUse < numSlots) {
-            const newPage = try self.newDataPage(); // OutOfMemory
+            // newDataPage initializes freeSlotsArray
+            const newPage = try self.newDataPage(&freeSlotsArray[inUse]); // OutOfMemory
             // link the new page
             const dataPtrArray = page.getValues(.Data);
             dataPtrArray[inUse] = newPage;
-            freeSlotsArray[inUse] = self.dataPageSlots - 1; // -1 because we are about to allocate on it
             page.header.inUse += 1;
             // alloc on the new page
-            return self.allocFromDataPage(newPage);
+            // allocFromDataPage updates freeSlotsArray
+            return self.allocFromDataPageMustBeFree(newPage);
         }
         // otherwise all slots on this index page are in use
         return error.IndexPageFull;
@@ -104,9 +119,23 @@ pub const RefrigeratorAllocator = struct {
         }
     }
 
-    fn allocFromDataPage(self: Self, page: *DataPage) []u8 {
-        var data: []u8 = [_]u8{};
-        return data;
+    fn allocFromDataPageMustBeFree(self: Self, page: *DataPage) []u8 {
+        assert(page.header.indexNumFree.* > 0);
+        const flagsList = self.getDataPageFlags(page);
+        var block: u32 = 0;
+        var index: u32 = 0;
+        while (flagsList[index] == fullFlags) {
+            index += 1;
+            block += 64;
+        }
+        const flags = flagsList[index];
+        const freeBlock = @clz(DataPageMask, ~flags);
+        const mask = dataMask(63 - freeBlock);
+        assert(freeBlock < 64);
+        assert(flagsList[index] & mask == 0);
+        flagsList[index] |= mask;
+        page.header.indexNumFree.* -= 1;
+        return self.getDataPageBlock(page, block + freeBlock);
     }
 
     fn newIndexPage(self: Self) !*IndexPage {
@@ -115,16 +144,68 @@ pub const RefrigeratorAllocator = struct {
         return newPage;
     }
 
-    fn newDataPage(self: Self) !*DataPage {
-        return error.OutOfMemory;
+    fn newDataPage(self: Self, indexNumFree: *u32) !*DataPage {
+        const newPage = try std.heap.direct_allocator.create(DataPage);
+
+        // init page metadata
+        newPage.header = DataPageHeader{
+            .indexNumFree = indexNumFree,
+        };
+        const flags = self.getDataPageFlags(newPage);
+        std.mem.set(DataPageMask, flags, 0);
+
+        // mark pages in the bitmask that don't actually exist as allocated
+        const extraBits = self.dataPageSlots % 64;
+        if (extraBits != 0) {
+            const firstInvalidBit = dataMask(64 - extraBits);
+            flags[flags.len - 1] = firstInvalidBit - 1;
+        }
+
+        // set the number of free slots to all of them
+        indexNumFree.* = self.dataPageSlots;
+
+        return newPage;
     }
 
+    fn getDataPageFlags(self: Self, page: *DataPage) []DataPageMask {
+        const flagsBase = util.adjustPtr(DataPageMask, page, @sizeOf(DataPageHeader));
+        return flagsBase[0..self.dataPageNumBitmaskLongs];
+    }
+
+    fn getDataPageChunk(self: Self, page: *DataPage) [*]u8 {
+        const offset = @sizeOf(DataPageHeader) + self.dataPageNumBitmaskLongs * @sizeOf(DataPageMask);
+        return util.adjustPtr(u8, page, offset);
+    }
+
+    fn getDataPageBlock(self: Self, page: *DataPage, block: u32) []u8 {
+        assert(block < self.dataPageSlots);
+        const chunkBase = self.getDataPageChunk(page);
+        const blockBase = util.adjustPtr(u8, chunkBase, block * self.blockSize);
+        return blockBase[0..self.blockSize];
+    }
+
+    fn dataMask(index: u32) DataPageMask {
+        return @intCast(u64, 1) << @truncate(u6, index);
+    }
+
+    const DataPageMask = u64;
+    const fullFlags = @bitCast(DataPageMask, @intCast(i64, -1));
+
+    const dataPageCanary: u64 = 0xc0de1337cafed00d;
+    const DataPageHeader = struct {
+        canary: u64 = dataPageCanary,
+        indexNumFree: *u32,
+    };
     const DataPage = struct {
-        data: u32,
+        header: DataPageHeader align(chunk_size),
+        // following the header is an array of i64s, each representing a bitmask of blocks.
+        // 1 is occupied, 0 is free.  blocks immediately follow these masks.
     };
 };
 
-test "fridge alloc" {
-    var allocator = RefrigeratorAllocator.init(64);
+test "block alloc" {
+    var allocator = BlockAllocator.init(64);
+    _ = try allocator.alloc();
+    _ = try allocator.alloc();
     _ = try allocator.alloc();
 }

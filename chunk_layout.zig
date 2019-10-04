@@ -17,6 +17,24 @@ pub const TypeLayout = struct {
     }
 };
 
+/// Creates a data type which spans an entire aligned chunk of memory.
+/// The type has a header and a series of spans of SOA data.
+/// Consider this example:
+///
+/// const Header = struct { value: u8 };
+/// const Values = union(enum) { Offset: u32, Ptr: *u32 };
+/// const Example = StaticChunk(Header, Values, std.mem.page_size);
+/// const instance = @ptrCast(*Example, try allocPage())
+///
+/// the Example type is 4096 bytes long and has an alignment of 4096.
+/// Each instance is laid out as follows:
+/// [u8|alignPad|u32|u32|...|u32|alignPad|u32*|u32*|...|u32*|alignPad]
+///  ^ Header    ^^^ Offsets ^^^          ^^^^^^ Ptrs ^^^^^^
+/// the alignPad regions may be empty if no alignment or padding is necessary.
+/// To access the data arrays, use instance.getValues(.Offset) or instance.getValues(.Ptr)
+/// To access the header, use instance.header.
+/// To get the chunk from a pointer to the header, use instance = Example.getFromHeader(pHeader);
+///
 pub fn StaticChunk(comptime InHeader: type, comptime InValueUnion: type, comptime inChunkSize: u32) type {
     const inValueTypes = util.extractTypesFromUnion(InValueUnion);
 
@@ -51,7 +69,7 @@ pub fn StaticChunk(comptime InHeader: type, comptime InValueUnion: type, comptim
             return ValTypeIndex(@enumToInt(value));
         }
 
-        pub fn ValTypeIndex(comptime index: u32) type {
+        fn ValTypeIndex(comptime index: u32) type {
             if (index > inValueTypes.len)
                 @compileError("Invalid data type index");
             return inValueTypes[index];
@@ -84,12 +102,13 @@ pub fn StaticChunk(comptime InHeader: type, comptime InValueUnion: type, comptim
         }
 
         /// Get the slice of values for the given value index
-        pub fn getValuesIndex(self: *Self, comptime index: u32) []ValTypeIndex(index) {
+        fn getValuesIndex(self: *Self, comptime index: u32) []ValTypeIndex(index) {
             const T = ValTypeIndex(index);
             const valuesBase = util.adjustPtr(T, self, layout.offsets[index]);
             return valuesBase[0..layout.numItems];
         }
 
+        /// Get the chunk object from a pointer to the header
         pub fn getFromHeader(ptr: *Header) *Self {
             return @fieldParentPtr(Self, "header", ptr);
         }
