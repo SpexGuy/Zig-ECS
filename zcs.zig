@@ -130,7 +130,7 @@ test "Masks" {
     assert(ZCS.getArchMask([_]type{ Position, Velocity, GravityTag }) == 11);
 
     const ArchID = ZCS.ArchMask;
-    const ChunkID = packed struct {
+    const ChunkID = struct {
         value: u32,
     };
 
