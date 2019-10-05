@@ -35,18 +35,13 @@ pub const TypeLayout = struct {
 /// To access the header, use instance.header.
 /// To get the chunk from a pointer to the header, use instance = Example.getFromHeader(pHeader);
 ///
-pub fn StaticChunk(comptime InHeader: type, comptime InValueUnion: type, comptime inChunkSize: u32) type {
+pub fn SOASchema(comptime InHeader: type, comptime InValueUnion: type) type {
     const inValueTypes = util.extractTypesFromUnion(InValueUnion);
 
     comptime var layouts: [inValueTypes.len]TypeLayout = undefined;
     inline for (inValueTypes) |ValType, i| {
         layouts[i] = TypeLayout.init(ValType);
     }
-
-    const staticLayout = layoutStaticChunk(inChunkSize, @sizeOf(InHeader), layouts);
-
-    assert(util.isPowerOfTwo(inChunkSize));
-    assert(inChunkSize > @sizeOf(InHeader));
 
     // Zig doesn't allow pointers to structs of zero size, so we need to make sure
     // that the Chunk type has nonzero size.  In the case of a zero-sized header, we will
@@ -64,6 +59,12 @@ pub fn StaticChunk(comptime InHeader: type, comptime InValueUnion: type, comptim
         /// Type: enum containing values for each data array.
         pub const Values = @TagType(InValueUnion);
 
+        /// Type: the type of a chunk.  Its alignment will always
+        /// be chunkSize.
+        pub const Chunk = struct {
+            header: ActualHeaderType,
+        };
+
         /// Type: returns the type of the component at the given index
         pub fn ValType(comptime value: Values) type {
             return ValTypeIndex(@enumToInt(value));
@@ -76,61 +77,69 @@ pub fn StaticChunk(comptime InHeader: type, comptime InValueUnion: type, comptim
         }
 
         // -------------- constant values --------------
-        pub const chunkSize = inChunkSize;
         pub const valueLayouts = layouts;
-        pub const layout = staticLayout;
 
         // -------------- memory pattern --------------
-
-        /// If the passed header was of zero size, this is u8 and may overlap data.
-        header: ActualHeaderType align(inChunkSize),
+        chunkSize: u32,
+        layout: Layout(layouts.len),
 
         // -------------- functions --------------
+
+        /// Creates a runtime type for a laid out chunk of a known size
+        pub fn layout(inChunkSize: u32) Self {
+            assert(util.isPowerOfTwo(inChunkSize));
+            assert(inChunkSize > @sizeOf(InHeader));
+
+            const staticLayout = layoutStaticChunk(inChunkSize, @sizeOf(InHeader), layouts);
+
+            return Self{
+                .chunkSize = inChunkSize,
+                .layout = staticLayout,
+            };
+        }
 
         /// Given a pointer to somewhere within the data section of a chunk,
         /// this function returns a pointer to the parent chunk, from which
         /// the header or other data can be retrieved.
-        pub fn getFromPointerInBlock(ptr: var) *Self {
+        pub fn getChunkFromPointerInBlock(self: Self, ptr: var) *Chunk {
             const address = @ptrToInt(ptr);
-            const baseAddress = util.alignDown(address, chunkSize);
-            return @intToPtr(*Self, baseAddress);
+            const baseAddress = util.alignDown(address, self.chunkSize);
+            return @intToPtr(*Chunk, baseAddress);
         }
 
         /// Get the slice of values for the given value type
-        pub fn getValues(self: *Self, comptime value: Values) []ValType(value) {
-            return getValuesIndex(self, @enumToInt(value));
+        pub fn getValues(self: Self, chunk: *Chunk, comptime value: Values) []ValType(value) {
+            return self.getValuesIndex(chunk, @enumToInt(value));
         }
 
         /// Get the slice of values for the given value index
-        fn getValuesIndex(self: *Self, comptime index: u32) []ValTypeIndex(index) {
+        fn getValuesIndex(self: Self, chunk: *Chunk, comptime index: u32) []ValTypeIndex(index) {
             const T = ValTypeIndex(index);
-            const valuesBase = util.adjustPtr(T, self, layout.offsets[index]);
-            return valuesBase[0..layout.numItems];
+            const valuesBase = util.adjustPtr(T, chunk, self.layout.offsets[index]);
+            return valuesBase[0..self.layout.numItems];
         }
 
         /// Get the chunk object from a pointer to the header
-        pub fn getFromHeader(ptr: *Header) *Self {
-            return @fieldParentPtr(Self, "header", ptr);
+        pub fn getChunkFromHeader(self: Self, ptr: *Header) *Chunk {
+            return getChunkFromHeaderStatic(ptr);
         }
 
-        // -------------- consistency --------------
-        comptime {
-            assert(@sizeOf(Self) == inChunkSize);
-            assert(@alignOf(Self) == inChunkSize);
-            // @todo: figure out how to assert at compile time that the offset of header is 0
+        /// Get the chunk object from a pointer to the header
+        pub fn getChunkFromHeaderStatic(ptr: *Header) *Chunk {
+            return @fieldParentPtr(Chunk, "header", ptr);
         }
     };
 }
 
-pub fn ChunkLayout(comptime n: u32) type {
+pub fn Layout(comptime n: u32) type {
     return struct {
         numItems: u32,
         offsets: [n]u32,
     };
 }
 
-pub fn layoutStaticChunk(chunkSize: u32, headerSize: u32, comptime types: []const TypeLayout) ChunkLayout(types.len) {
-    var ret: ChunkLayout(types.len) = undefined;
+pub fn layoutStaticChunk(chunkSize: u32, headerSize: u32, comptime types: []const TypeLayout) Layout(types.len) {
+    var ret: Layout(types.len) = undefined;
     ret.numItems = layoutChunk(chunkSize, headerSize, types, ret.offsets[0..]);
     return ret;
 }
@@ -185,19 +194,21 @@ test "static chunk layout" {
         next: ?*@This(),
     };
     const chunkSize = 4096;
-    const LinkedChunk = StaticChunk(Header, union(enum) {
+    const LinkedChunkSchema = SOASchema(Header, union(enum) {
         First: u32,
         Second: u64,
         Third: *u32,
-    }, chunkSize);
-    const chunk = try std.heap.direct_allocator.create(LinkedChunk);
+    });
+    const chunkLayout = LinkedChunkSchema.layout(chunkSize);
+    // @todo this technically works but we should specify alignment and size properly here.
+    const chunk = try std.heap.direct_allocator.create(LinkedChunkSchema.Chunk);
     chunk.header.next = &chunk.header;
 
-    const longs = chunk.getValues(.First);
+    const longs = chunkLayout.getValues(chunk, .First);
     const offset = util.ptrDiff(chunk, longs.ptr);
     //std.debug.warn("offset {} is {}, count is {}\n", @typeName(Type), diff, longs.len);
-    assert(@intCast(u32, offset) == LinkedChunk.layout.offsets[0]);
+    assert(@intCast(u32, offset) == chunkLayout.layout.offsets[0]);
 
-    assert(LinkedChunk.getFromHeader(&chunk.header) == chunk);
+    assert(chunkLayout.getChunkFromHeader(&chunk.header) == chunk);
     assert(util.ptrDiff(&chunk.header, chunk) == 0);
 }
