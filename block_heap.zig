@@ -362,15 +362,15 @@ pub const BlockHeap = struct {
     }
 
     fn newIndexPage(self: Self) !*IndexPage {
-        // @todo: This is wrong, allocate the correct size and alignment.
-        const newPage = try std.heap.direct_allocator.create(IndexPage);
+        const newDirectPage = try self.allocDirectPage(self.pageSize, self.pageSize);
+        const newPage = @ptrCast(*IndexPage, @alignCast(4096, newDirectPage.ptr));
         newPage.header = IndexPageHeader{};
         return newPage;
     }
 
     fn newDataPage(self: Self, allocator: *BlockAllocator, indexNumFree: *u32) !*DataPage {
-        // @todo: This is wrong, allocate the correct size and alignment.
-        const newPage = try std.heap.direct_allocator.create(DataPage);
+        const newDirectPage = try self.allocDirectPage(self.pageSize, self.pageSize);
+        const newPage = @ptrCast(*DataPage, @alignCast(4096, newDirectPage.ptr));
         self.initDataPage(allocator, newPage, indexNumFree);
         return newPage;
     }
