@@ -27,9 +27,8 @@ pub const PageArenaAllocator = struct {
     directAllocs: ?*DirectAlloc,
     endIndex: usize,
 
-    const BufNode = std.SinglyLinkedList([]u8).Node;
-
     pub fn init(pageSize: u32) Self {
+        assert(util.isPowerOfTwo(pageSize));
         return Self{
             .allocator = mem.Allocator{
                 .reallocFn = realloc,

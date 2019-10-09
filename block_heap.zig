@@ -9,9 +9,13 @@ const math = std.math;
 const page_allocator = std.heap.direct_allocator;
 
 const sizes = [_]u32{
-    64, 128, 256, 512, 1024, 2048,
+    16,   32,   64,   128,  256,   512,
+    1024, 2048, 4096, 8192, 16384,
 };
 
+const indexPageSize = mem.page_size;
+const dataPageSize = 64 * 1024;
+const maxBlockSize = sizes[sizes.len - 1];
 const smallestBlockSize = sizes[0];
 
 const IndexPageHeader = struct {
@@ -52,25 +56,21 @@ pub const BlockHeap = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    pageSize: u29,
     indexPageLayout: IndexPageSchema,
     blockAllocators: [sizes.len]BlockAllocator,
 
-    pub fn init(pageSize: u32) Self {
-        assert(util.isPowerOfTwo(pageSize));
-
+    pub fn init() Self {
         var newHeap = Self{
             .allocator = mem.Allocator{
                 .reallocFn = realloc,
                 .shrinkFn = shrink,
             },
-            .pageSize = @intCast(u29, pageSize),
-            .indexPageLayout = IndexPageSchema.layout(pageSize),
+            .indexPageLayout = IndexPageSchema.layout(indexPageSize),
             .blockAllocators = undefined, // we'll fill this in next
         };
 
         for (sizes) |blockSize, i| {
-            newHeap.blockAllocators[i] = BlockAllocator.init(pageSize, blockSize);
+            newHeap.blockAllocators[i] = BlockAllocator.init(blockSize);
         }
 
         return newHeap;
@@ -79,7 +79,7 @@ pub const BlockHeap = struct {
     fn realloc(
         allocator: *mem.Allocator,
         old_mem: []u8,
-        old_alignment: u29,
+        min_old_alignment: u29,
         new_byte_count: usize,
         new_alignment: u29,
     ) error{OutOfMemory}![]u8 {
@@ -87,9 +87,10 @@ pub const BlockHeap = struct {
         const self = @fieldParentPtr(Self, "allocator", allocator);
         if (old_mem.len == 0) {
             // new allocation
-            if (self.isDirectAllocation(new_byte_count, new_alignment)) {
+            if (self.shouldDirectAllocate(new_byte_count, new_alignment)) {
                 const directSize = self.toDirectAllocationSize(new_byte_count);
-                const newDirectMem = try page_allocator.reallocFn(page_allocator, old_mem, old_alignment, directSize, self.pageSize);
+                const directAlignment = math.max(new_alignment, dataPageSize);
+                const newDirectMem = try self.allocDirectPage(directSize, directAlignment);
                 return newDirectMem[0..new_byte_count];
             } else {
                 const block = try self.alignedBlockAlloc(new_byte_count, new_alignment);
@@ -97,27 +98,29 @@ pub const BlockHeap = struct {
             }
         } else {
             // realloc an existing allocation
-            if (self.isDirectAllocation(old_mem.len, old_alignment)) {
-                assert(self.isDirectAllocation(new_byte_count, new_alignment));
+            if (self.isDirectAllocation(old_mem)) {
+                assert(self.shouldDirectAllocate(new_byte_count, new_alignment));
                 const oldFullMem = self.toDirectAllocation(old_mem);
                 const newMemSize = self.toDirectAllocationSize(new_byte_count);
-                const newFullMem = try page_allocator.reallocFn(page_allocator, oldFullMem, old_alignment, newMemSize, new_alignment);
+                const directAlignment = math.max(new_alignment, dataPageSize);
+                const newFullMem = try page_allocator.reallocFn(page_allocator, oldFullMem, min_old_alignment, newMemSize, directAlignment);
                 return newFullMem[0..new_byte_count];
             } else {
-                const oldSize = math.max(old_mem.len, old_alignment);
+                const oldSize = math.max(old_mem.len, min_old_alignment);
                 const newSize = math.max(new_byte_count, new_alignment);
                 if (newSize <= oldSize) {
-                    return shrink(allocator, old_mem, old_alignment, new_byte_count, new_alignment);
+                    return shrink(allocator, old_mem, min_old_alignment, new_byte_count, new_alignment);
                 }
-                if (self.isDirectAllocation(new_byte_count, new_alignment)) {
+                if (self.shouldDirectAllocate(new_byte_count, new_alignment)) {
                     const directSize = self.toDirectAllocationSize(new_byte_count);
-                    const newDirectMem = try self.allocDirectPage(directSize, new_alignment);
+                    const directAlignment = math.max(new_alignment, dataPageSize);
+                    const newDirectMem = try self.allocDirectPage(directSize, directAlignment);
                     @memcpy(newDirectMem.ptr, old_mem.ptr, math.min(old_mem.len, new_byte_count));
                     self.freeBlock(old_mem.ptr);
                     return newDirectMem[0..new_byte_count];
                 } else {
                     // check if we can fit it in the existing allocation
-                    const oldBlockSize = self.getBlockSize(old_mem.len, old_alignment);
+                    const oldBlockSize = self.getBlockSize(old_mem.len, min_old_alignment);
                     if (new_byte_count <= oldBlockSize and util.isAlignedPtr(old_mem.ptr, new_alignment)) {
                         // this slice is fine
                         return old_mem.ptr[0..new_byte_count];
@@ -137,21 +140,21 @@ pub const BlockHeap = struct {
     fn shrink(
         allocator: *mem.Allocator,
         old_mem: []u8,
-        old_alignment: u29,
+        min_old_alignment: u29,
         new_byte_count: usize,
         new_alignment: u29,
     ) []u8 {
         if (old_mem.len == 0)
             return util.emptySlice(u8);
         const self = @fieldParentPtr(Self, "allocator", allocator);
-        if (self.isDirectAllocation(old_mem.len, old_alignment)) {
+        if (self.isDirectAllocation(old_mem)) {
             const fullOldChunk = self.toDirectAllocation(old_mem);
-            if (new_byte_count == 0 or self.isDirectAllocation(new_byte_count, new_alignment)) {
+            if (new_byte_count == 0 or self.shouldDirectAllocate(new_byte_count, new_alignment)) {
                 const newDirectSize = self.toDirectAllocationSize(new_byte_count);
                 const newDirectPage = page_allocator.shrinkFn(
                     page_allocator,
                     fullOldChunk,
-                    old_alignment,
+                    min_old_alignment,
                     newDirectSize,
                     new_alignment,
                 );
@@ -162,40 +165,47 @@ pub const BlockHeap = struct {
                     // copy memory
                     @memcpy(newMem.ptr, old_mem.ptr, new_byte_count);
                     // free the old chunk
-                    _ = page_allocator.shrinkFn(page_allocator, fullOldChunk, old_alignment, 0, 0);
+                    _ = page_allocator.shrinkFn(page_allocator, fullOldChunk, min_old_alignment, 0, 0);
                     // truncate the result down to the requested size
                     return newMem[0..new_byte_count];
                 } else |err| {
+                    // move the allocation to an aligned point in the chunk,
+                    // but leave space for the header.  Set the header to a fake page,
+                    // then return the aligned block.  Don't overlap the new memory
+                    // with the old memory so that memcpy is safe.  We can do this because
+                    // we know that new_byte_count is less than half of the data page size.
+                    var offset: usize = math.max(@sizeOf(DataPageHeader), new_byte_count);
+                    offset = util.alignUp(offset, new_alignment);
+                    const newNeededSize = offset + new_byte_count;
+                    const newDirectSize = self.toDirectAllocationSize(newNeededSize);
+                    assert(newDirectSize <= fullOldChunk.len);
+
                     // couldn't do an aligned alloc
                     // we will recognize this as a block alloc in the future,
                     // so we need to trick this into being an alloc.
-                    // If the old memory is more than a page, we need to realloc it
-                    // onto a page, to ensure correct tracking.
+                    // If the old memory is more than a data page, we need to realloc it
+                    // onto a data page, to ensure correct tracking.
+                    assert(fullOldChunk.len >= dataPageSize);
                     var newChunk = fullOldChunk;
-                    if (old_mem.len > self.pageSize or old_alignment > self.pageSize) {
+                    if (newDirectSize < fullOldChunk.len) {
                         newChunk = page_allocator.shrinkFn(
                             page_allocator,
                             old_mem,
-                            old_alignment,
-                            self.pageSize,
-                            self.pageSize,
+                            min_old_alignment,
+                            newDirectSize,
+                            dataPageSize,
                         );
                     }
 
-                    // move the allocation to an aligned point in the chunk,
-                    // but leave space for the header.  Set the header to a fake page,
-                    // then return the aligned block.
-                    var offset: usize = @sizeOf(DataPageHeader);
-                    offset = util.alignUp(offset, new_alignment);
-                    assert(offset + new_byte_count <= self.pageSize);
+                    assert(util.isAlignedPtr(newChunk.ptr, dataPageSize));
 
                     const newDataPtr = util.adjustPtr(u8, newChunk.ptr, @intCast(isize, offset));
                     @memcpy(newDataPtr, newChunk.ptr, new_byte_count);
 
-                    const header = @ptrCast(*DataPageHeader, @alignCast(4096, newChunk.ptr));
+                    const header = @ptrCast(*DataPageHeader, @alignCast(dataPageSize, newChunk.ptr));
                     header.* = DataPageHeader{
                         .canary = fakeDataPageCanary,
-                        .indexNumFree = undefined,
+                        .indexNumFree = @intToPtr(*u32, newDirectSize),
                         .blockAllocator = undefined,
                     };
 
@@ -209,11 +219,11 @@ pub const BlockHeap = struct {
             }
 
             // this is a block allocation
-            const old_block_size = self.getBlockSize(old_mem.len, old_alignment);
+            const old_block_size = self.getBlockSize(old_mem.len, min_old_alignment);
             const new_block_size = self.getBlockSize(new_byte_count, new_alignment);
             assert(new_block_size <= old_block_size);
 
-            var newBlock = old_mem;
+            var newBlock = old_mem.ptr[0..old_block_size];
             if (new_block_size < old_block_size) {
                 // try to realloc in smaller allocator.
                 const newBlockAllocator = self.getBlockAllocator(new_block_size);
@@ -228,8 +238,12 @@ pub const BlockHeap = struct {
         }
     }
 
+    fn isDirectAllocation(self: Self, allocation: []u8) bool {
+        return util.isAlignedPtr(allocation.ptr, dataPageSize);
+    }
+
     fn toDirectAllocationSize(self: Self, size: usize) usize {
-        return util.alignUp(size, self.pageSize);
+        return util.alignUp(size, mem.page_size);
     }
 
     fn toDirectAllocation(self: Self, parentAlloc: []u8) []u8 {
@@ -238,13 +252,9 @@ pub const BlockHeap = struct {
         return parentAlloc.ptr[0..actualSize];
     }
 
-    fn isDirectAllocation(self: Self, size: usize, alignment: u29) bool {
+    fn shouldDirectAllocate(self: Self, size: usize, alignment: u29) bool {
         const blockSize = math.max(size, alignment);
-        return blockSize > self.maxBlockSize();
-    }
-
-    fn maxBlockSize(self: Self) u32 {
-        return self.pageSize / 4;
+        return blockSize > maxBlockSize;
     }
 
     fn getBlockSize(self: Self, size: usize, alignment: u29) u32 {
@@ -252,7 +262,7 @@ pub const BlockHeap = struct {
         var blockSize: u32 = math.max(@intCast(u32, size), alignment);
         blockSize = util.roundUpToPowerOfTwo(blockSize);
         blockSize = math.max(blockSize, smallestBlockSize);
-        assert(blockSize <= self.maxBlockSize());
+        assert(blockSize <= maxBlockSize);
         return blockSize;
     }
 
@@ -269,7 +279,7 @@ pub const BlockHeap = struct {
 
     fn freeBlock(self: Self, ptrInBlock: [*]u8) void {
         const address = @ptrToInt(ptrInBlock);
-        const headerAddress = address & ~(u64(self.pageSize) - 1);
+        const headerAddress = address & ~(usize(dataPageSize) - 1);
         const page = @intToPtr(*DataPage, headerAddress);
         switch (page.header.canary) {
             dataPageCanary => {
@@ -280,7 +290,7 @@ pub const BlockHeap = struct {
                 assert(chunkOffset % blockSize == 0);
                 var chunkIndex: u32 = chunkOffset / blockSize;
                 var flagsIndex: u32 = 0;
-                while (chunkIndex > 64) {
+                while (chunkIndex >= 64) {
                     chunkIndex -= 64;
                     flagsIndex += 1;
                 }
@@ -290,9 +300,10 @@ pub const BlockHeap = struct {
                 page.header.indexNumFree.* += 1;
             },
             fakeDataPageCanary => {
+                const mappedLength = @ptrToInt(page.header.indexNumFree);
                 const untypedPage = @ptrCast([*]u8, page);
-                const fullPage = untypedPage[0..self.pageSize];
-                _ = page_allocator.shrinkFn(page_allocator, fullPage, self.pageSize, 0, 0);
+                const fullPage = untypedPage[0..mappedLength];
+                _ = page_allocator.shrinkFn(page_allocator, fullPage, mem.page_size, 0, 0);
             },
             else => unreachable,
         }
@@ -362,21 +373,21 @@ pub const BlockHeap = struct {
     }
 
     fn newIndexPage(self: Self) !*IndexPage {
-        const newDirectPage = try self.allocDirectPage(self.pageSize, self.pageSize);
-        const newPage = @ptrCast(*IndexPage, @alignCast(4096, newDirectPage.ptr));
+        const newDirectPage = try self.allocDirectPage(indexPageSize, mem.page_size);
+        const newPage = @ptrCast(*IndexPage, @alignCast(mem.page_size, newDirectPage.ptr));
         newPage.header = IndexPageHeader{};
         return newPage;
     }
 
     fn newDataPage(self: Self, allocator: *BlockAllocator, indexNumFree: *u32) !*DataPage {
-        const newDirectPage = try self.allocDirectPage(self.pageSize, self.pageSize);
-        const newPage = @ptrCast(*DataPage, @alignCast(4096, newDirectPage.ptr));
+        const newDirectPage = try self.allocDirectPage(dataPageSize, dataPageSize);
+        const newPage = @ptrCast(*DataPage, @alignCast(dataPageSize, newDirectPage.ptr));
         self.initDataPage(allocator, newPage, indexNumFree);
         return newPage;
     }
 
     fn allocDirectPage(self: Self, size: usize, alignment: u29) ![]u8 {
-        assert(util.isAligned(size, self.pageSize));
+        assert(util.isAligned(size, mem.page_size));
         assert(util.isPowerOfTwo(alignment));
         return try page_allocator.reallocFn(page_allocator, util.emptySlice(u8), 0, size, alignment);
     }
@@ -426,7 +437,7 @@ pub const BlockHeap = struct {
     }
 
     fn getDataPageChunk(self: Self, allocator: *BlockAllocator, page: *DataPage) [*]u8 {
-        const offset = self.pageSize - allocator.dataPageSlots * allocator.blockSize;
+        const offset = dataPageSize - allocator.dataPageSlots * allocator.blockSize;
         return util.adjustPtr(u8, page, offset);
     }
 
@@ -446,15 +457,15 @@ pub const BlockAllocator = struct {
     dataPageSlots: u32,
     firstHeader: ?*IndexPageHeader = null,
 
-    pub fn init(pageSize: u32, inBlockSize: u32) Self {
+    pub fn init(inBlockSize: u32) Self {
         assert(util.isPowerOfTwo(inBlockSize));
         assert(inBlockSize >= 8);
 
         // this isn't perfect but it should be close enough.
-        const maxChunkSize = pageSize - @sizeOf(DataPageHeader) - @sizeOf(DataPageMask);
+        const maxChunkSize = dataPageSize - @sizeOf(DataPageHeader) - @sizeOf(DataPageMask);
         const maxNumBlocks = maxChunkSize / inBlockSize;
         const numBitmasks = (maxNumBlocks + 63) / 64;
-        const chunkSize = pageSize - @sizeOf(DataPageHeader) - numBitmasks * @sizeOf(DataPageMask);
+        const chunkSize = dataPageSize - @sizeOf(DataPageHeader) - numBitmasks * @sizeOf(DataPageMask);
         const numBlocks = chunkSize / inBlockSize;
 
         return Self{
@@ -466,9 +477,9 @@ pub const BlockAllocator = struct {
 };
 
 test "block alloc" {
-    var allocator = BlockHeap.init(4096);
+    var allocator = BlockHeap.init();
     const a = try allocator.allocator.alloc(u8, 64);
-    const b = try allocator.allocator.alloc(u8, 32);
+    const b = try allocator.allocator.alloc(u8, 33);
     const c = try allocator.allocator.alloc(u8, 64);
     allocator.allocator.free(b);
     const d = try allocator.allocator.alloc(u8, 64);
