@@ -1,11 +1,9 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const mem = std.mem;
-const heap = std.heap;
 const math = std.math;
 const util = @import("util.zig");
-
-const page_allocator = heap.direct_allocator;
+const pages = @import("pages.zig");
 
 /// This allocator
 pub const PageArenaAllocator = struct {
@@ -18,7 +16,6 @@ pub const PageArenaAllocator = struct {
     const DirectAlloc = struct {
         next: ?*@This(),
         mem: []u8,
-        alignment: u29,
     };
 
     pub allocator: mem.Allocator,
@@ -45,16 +42,16 @@ pub const PageArenaAllocator = struct {
         // first free direct allocations
         var directIt = self.directAllocs;
         while (directIt) |allocation| {
-            _ = page_allocator.shrinkFn(page_allocator, allocation.mem, allocation.alignment, 0, 0);
+            pages.release(allocation.mem);
             directIt = allocation.next;
         }
         self.directAllocs = null;
 
         var pageIt = self.currentPage;
-        while (pageIt) |page| {
+        while (pageIt) |pageHead| {
             // this has to occur before the free because the free frees node
-            const next = page.next;
-            self.freePage(page);
+            const next = pageHead.next;
+            pages.releaseAs(pageHead, self.pageSize);
             pageIt = next;
         }
         self.currentPage = null;
@@ -73,6 +70,8 @@ pub const PageArenaAllocator = struct {
     }
 
     fn shrink(allocator: *mem.Allocator, old_mem: []u8, old_align: u29, new_size: usize, new_align: u29) []u8 {
+        assert(new_size <= old_mem.len);
+        assert(util.isAlignedPtr(old_mem.ptr, new_align));
         return old_mem[0..new_size];
     }
 
@@ -93,21 +92,21 @@ pub const PageArenaAllocator = struct {
 
     fn allocDirect(self: *Self, size: usize, alignment: u29) ![]u8 {
         const sizeFullPages = util.alignUp(size, self.pageSize);
+        const pageAlignment: u29 = math.max(mem.page_size, alignment);
 
-        const page = try page_allocator.reallocFn(page_allocator, util.emptySlice(u8), 0, sizeFullPages, alignment);
-        errdefer self.freePage(@ptrCast(*Header, @alignCast(4096, page.ptr)));
+        const pageMem = try pages.obtainAligned(sizeFullPages, pageAlignment);
+        errdefer pages.release(pageMem);
 
         const metaMem = try self.allocOnPage(@sizeOf(DirectAlloc), @alignOf(DirectAlloc));
         const meta = @ptrCast(*DirectAlloc, @alignCast(@alignOf(DirectAlloc), metaMem.ptr));
 
         meta.* = DirectAlloc{
             .next = self.directAllocs,
-            .mem = page,
-            .alignment = alignment,
+            .mem = pageMem,
         };
         self.directAllocs = meta;
 
-        return page[0..size];
+        return pageMem[0..size];
     }
 
     fn allocOnPage(self: *Self, size: usize, alignment: u29) ![]u8 {
@@ -125,22 +124,16 @@ pub const PageArenaAllocator = struct {
     }
 
     fn newPage(self: *Self) !void {
-        const page = try page_allocator.reallocFn(page_allocator, util.emptySlice(u8), 0, self.pageSize, self.pageSize);
-        const header = @ptrCast(*Header, @alignCast(4096, page.ptr));
+        const header = try pages.obtainAs(Header, self.pageSize);
         header.* = Header{
             .next = self.currentPage,
         };
         self.currentPage = header;
         self.endIndex = @sizeOf(Header);
     }
-
-    fn freePage(self: Self, page: *Header) void {
-        const pageMem = @ptrCast([*]u8, page)[0..self.pageSize];
-        _ = page_allocator.shrinkFn(page_allocator, pageMem, self.pageSize, 0, 0);
-    }
 };
 
-test "page arena allocator" {
+test "pages arena allocator" {
     var allocator = PageArenaAllocator.init(4096);
     try @import("test_allocator.zig").testAll(&allocator.allocator);
     allocator.deinit();

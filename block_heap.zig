@@ -1,12 +1,11 @@
 const std = @import("std");
 const util = @import("util.zig");
 const chunk_layout = @import("chunk_layout.zig");
+const pages = @import("pages.zig");
 const assert = std.debug.assert;
 const testing = std.testing;
 const mem = std.mem;
 const math = std.math;
-
-const page_allocator = std.heap.direct_allocator;
 
 const sizes = [_]u32{
     16,   32,   64,   128,  256,   512,
@@ -90,7 +89,7 @@ pub const BlockHeap = struct {
             if (self.shouldDirectAllocate(new_byte_count, new_alignment)) {
                 const directSize = self.toDirectAllocationSize(new_byte_count);
                 const directAlignment = math.max(new_alignment, dataPageSize);
-                const newDirectMem = try self.allocDirectPage(directSize, directAlignment);
+                const newDirectMem = try pages.obtainAligned(directSize, directAlignment);
                 return newDirectMem[0..new_byte_count];
             } else {
                 const block = try self.alignedBlockAlloc(new_byte_count, new_alignment);
@@ -103,7 +102,7 @@ pub const BlockHeap = struct {
                 const oldFullMem = self.toDirectAllocation(old_mem);
                 const newMemSize = self.toDirectAllocationSize(new_byte_count);
                 const directAlignment = math.max(new_alignment, dataPageSize);
-                const newFullMem = try page_allocator.reallocFn(page_allocator, oldFullMem, min_old_alignment, newMemSize, directAlignment);
+                const newFullMem = try pages.reallocAligned(oldFullMem, newMemSize, directAlignment);
                 return newFullMem[0..new_byte_count];
             } else {
                 const oldSize = math.max(old_mem.len, min_old_alignment);
@@ -114,7 +113,7 @@ pub const BlockHeap = struct {
                 if (self.shouldDirectAllocate(new_byte_count, new_alignment)) {
                     const directSize = self.toDirectAllocationSize(new_byte_count);
                     const directAlignment = math.max(new_alignment, dataPageSize);
-                    const newDirectMem = try self.allocDirectPage(directSize, directAlignment);
+                    const newDirectMem = try pages.obtainAligned(directSize, directAlignment);
                     @memcpy(newDirectMem.ptr, old_mem.ptr, math.min(old_mem.len, new_byte_count));
                     self.freeBlock(old_mem.ptr);
                     return newDirectMem[0..new_byte_count];
@@ -151,13 +150,8 @@ pub const BlockHeap = struct {
             const fullOldChunk = self.toDirectAllocation(old_mem);
             if (new_byte_count == 0 or self.shouldDirectAllocate(new_byte_count, new_alignment)) {
                 const newDirectSize = self.toDirectAllocationSize(new_byte_count);
-                const newDirectPage = page_allocator.shrinkFn(
-                    page_allocator,
-                    fullOldChunk,
-                    min_old_alignment,
-                    newDirectSize,
-                    new_alignment,
-                );
+                const newDirectAlignment = math.max(dataPageSize, new_alignment);
+                const newDirectPage = pages.shrinkAligned(fullOldChunk, newDirectSize, newDirectAlignment);
                 return newDirectPage[0..new_byte_count];
             } else {
                 // moving from direct allocation to paged alloc
@@ -165,7 +159,7 @@ pub const BlockHeap = struct {
                     // copy memory
                     @memcpy(newMem.ptr, old_mem.ptr, new_byte_count);
                     // free the old chunk
-                    _ = page_allocator.shrinkFn(page_allocator, fullOldChunk, min_old_alignment, 0, 0);
+                    pages.release(fullOldChunk);
                     // truncate the result down to the requested size
                     return newMem[0..new_byte_count];
                 } else |err| {
@@ -188,13 +182,7 @@ pub const BlockHeap = struct {
                     assert(fullOldChunk.len >= dataPageSize);
                     var newChunk = fullOldChunk;
                     if (newDirectSize < fullOldChunk.len) {
-                        newChunk = page_allocator.shrinkFn(
-                            page_allocator,
-                            old_mem,
-                            min_old_alignment,
-                            newDirectSize,
-                            dataPageSize,
-                        );
+                        newChunk = pages.shrinkAligned(old_mem, newDirectSize, dataPageSize);
                     }
 
                     assert(util.isAlignedPtr(newChunk.ptr, dataPageSize));
@@ -303,7 +291,7 @@ pub const BlockHeap = struct {
                 const mappedLength = @ptrToInt(page.header.indexNumFree);
                 const untypedPage = @ptrCast([*]u8, page);
                 const fullPage = untypedPage[0..mappedLength];
-                _ = page_allocator.shrinkFn(page_allocator, fullPage, mem.page_size, 0, 0);
+                pages.release(fullPage);
             },
             else => unreachable,
         }
@@ -373,23 +361,17 @@ pub const BlockHeap = struct {
     }
 
     fn newIndexPage(self: Self) !*IndexPage {
-        const newDirectPage = try self.allocDirectPage(indexPageSize, mem.page_size);
-        const newPage = @ptrCast(*IndexPage, @alignCast(mem.page_size, newDirectPage.ptr));
-        newPage.header = IndexPageHeader{};
+        const newPage = try pages.obtainAs(IndexPage, indexPageSize);
+        newPage.* = IndexPage{
+            .header = IndexPageHeader{},
+        };
         return newPage;
     }
 
     fn newDataPage(self: Self, allocator: *BlockAllocator, indexNumFree: *u32) !*DataPage {
-        const newDirectPage = try self.allocDirectPage(dataPageSize, dataPageSize);
-        const newPage = @ptrCast(*DataPage, @alignCast(dataPageSize, newDirectPage.ptr));
+        const newPage = try pages.obtainAlignedAs(DataPage, dataPageSize, dataPageSize);
         self.initDataPage(allocator, newPage, indexNumFree);
         return newPage;
-    }
-
-    fn allocDirectPage(self: Self, size: usize, alignment: u29) ![]u8 {
-        assert(util.isAligned(size, mem.page_size));
-        assert(util.isPowerOfTwo(alignment));
-        return try page_allocator.reallocFn(page_allocator, util.emptySlice(u8), 0, size, alignment);
     }
 
     fn initDataPage(self: Self, allocator: *BlockAllocator, newPage: *DataPage, indexNumFree: *u32) void {
