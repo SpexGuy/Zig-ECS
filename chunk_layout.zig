@@ -70,7 +70,7 @@ pub fn SOASchema(comptime InHeader: type, comptime InValueUnion: type) type {
             return ValTypeIndex(@enumToInt(value));
         }
 
-        fn ValTypeIndex(comptime index: u32) type {
+        pub fn ValTypeIndex(comptime index: u32) type {
             if (index > inValueTypes.len)
                 @compileError("Invalid data type index");
             return inValueTypes[index];
@@ -182,7 +182,8 @@ pub fn layoutChunk(chunkSize: u32, headerSize: u32, types: []const TypeLayout, o
 fn layoutItems(numItems: u32, headerSize: u32, types: []const TypeLayout, outOffsets: []u32) u32 {
     var pos = headerSize;
     for (types) |info, i| {
-        pos = @intCast(u32, util.alignUp(pos, info.alignment));
+        if (info.size != 0)
+            pos = @intCast(u32, util.alignUp(pos, info.alignment));
         outOffsets[i] = pos;
         pos += info.size * numItems;
     }

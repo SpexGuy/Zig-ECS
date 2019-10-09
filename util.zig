@@ -2,6 +2,8 @@ const std = @import("std");
 const mem = std.mem;
 const assert = std.debug.assert;
 
+pub const EmptyStruct = struct {};
+
 pub fn extractTypesFromUnion(comptime Type: type) [@memberCount(Type)]type {
     // ensure that the type is valid
     const info = @typeInfo(Type);

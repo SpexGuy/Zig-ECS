@@ -1,10 +1,30 @@
 const std = @import("std");
 const os = std.os;
+const mem = std.mem;
 const assert = std.debug.assert;
 const warn = std.debug.warn;
 const layout = @import("chunk_layout.zig");
 const TypeLayout = layout.TypeLayout;
 const layoutChunk = layout.layoutChunk;
+const util = @import("util.zig");
+const PageArenaAllocator = @import("page_arena_allocator.zig").PageArenaAllocator;
+const BlockHeap = @import("block_heap.zig").BlockHeap;
+const ArrayList = std.ArrayList;
+
+const chunkSize = 64 * 1024;
+const entityChunkSize = 64 * 1024;
+const chunkChunkSize = mem.page_size;
+const archChunkSize = mem.page_size;
+
+var tempAllocator = PageArenaAllocator.init(64 * 1024);
+var permAllocator = PageArenaAllocator.init(64 * 1024);
+var heapAllocator = BlockHeap.init();
+
+const stdTempAllocator = &tempAllocator.allocator;
+const stdPermAllocator = &permAllocator.allocator;
+const stdHeapAllocator = &heapAllocator.allocator;
+
+var lowMemory = false;
 
 /// Creates a ZCS type for the given set of components.
 /// This file should be used via this syntax:
@@ -60,20 +80,107 @@ pub fn Schema(comptime componentTypes: []const type) type {
         }
 
         pub const EntityManager = struct {
-            const layoutDesc = comptime layout.layoutStaticChunk(std.mem.page_size, 0, [_]TypeLayout{
-                TypeLayout.init(Entity),
-                TypeLayout.init(ArchMask),
-                TypeLayout.init(u32),
-            });
+            const EntityData = union(enum) {
+                Chunk: ChunkID,
+                Gen: Generation,
+            };
+            const ChunkSchema = layout.SOASchema(util.EmptyStruct, EntityData);
+            const Chunk = ChunkSchema.Chunk;
+            const chunkLayout = comptime ChunkSchema.layout(entityChunkSize);
+        };
+
+        pub const ChunkManager = struct {
+            const ChunkHeader = struct {
+                next: *ChunkHeader,
+            };
+            const ChunkMetaData = union(enum) {
+                ChunkData: *ChunkDataHeader,
+                NextChunkInArchetype: ChunkID,
+                Arch: ArchID,
+            };
+            const ChunkSchema = layout.SOASchema(ChunkHeader, ChunkMetaData);
+            const Chunk = ChunkSchema.Chunk;
+            const chunkLayout = comptime ChunkSchema.layout(chunkChunkSize);
+        };
+
+        pub const ArchetypeManager = struct {
+            const Self = @This();
+
+            const ArchetypeHeader = struct {
+                next: ?*ArchetypeHeader,
+            };
+            const ArchetypeData = union(enum) {
+                Components: []ComponentMeta,
+                FirstChunk: ChunkID,
+                Mask: ArchMask,
+            };
+            const ChunkSchema = layout.SOASchema(ArchetypeHeader, ArchetypeData);
+            const Chunk = ChunkSchema.Chunk;
+            const chunkLayout = comptime ChunkSchema.layout(archChunkSize);
+
+            firstPage: ?*ArchetypeHeader = null,
+
+            /// Finds all archetypes matching an include and exclude filter.
+            /// The returned slice is valid until the temp allocator is cleared.
+            pub fn findAllArchetypes(self: Self, include: ArchMask, exclude: ArchMask) []ArchetypeChunks {
+                assert(include & exclude == 0);
+                var archList = ArrayList(ArchetypeChunks).init(stdTempAllocator);
+                const checkMask = include | exclude;
+                var pageIt = self.firstPage;
+                pageLoop: while (pageIt) |header| : (pageIt = header.next) {
+                    const chunk = chunkLayout.getChunkFromHeader(header);
+                    const components = chunkLayout.getValues(chunk, .Components);
+                    const firstChunks = chunkLayout.getValues(chunk, .FirstChunk);
+                    const masks = chunkLayout.getValues(chunk, .Mask);
+                    for (masks) |mask, i| {
+                        if (mask & checkMask == include) {
+                            if (archList.addOne()) |pItem| {
+                                pItem.* = ArchetypeChunks{
+                                    .components = components[i],
+                                    .firstChunk = firstChunks[i],
+                                };
+                            } else |err| {
+                                lowMemory = true;
+                                break :pageLoop;
+                            }
+                        }
+                    }
+                }
+                //N.B. This looks like a leak but it's not because we're
+                //using the temp allocator, where free() is a noop.
+                return archList.toSlice();
+            }
+        };
+
+        const ComponentMeta = struct {
+            componentIndex: u32,
+            chunkOffset: u32,
+        };
+
+        const ArchetypeChunks = struct {
+            components: []ComponentMeta,
+            firstChunk: ChunkID,
+        };
+
+        pub const ChunkDataHeader = struct {
+            _notEmpty: u8 align(chunkSize),
         };
     };
 }
 
-pub const Generation = packed struct {
+pub const Generation = struct {
     value: u8,
 };
 
-pub const Entity = packed struct {
+pub const ChunkID = struct {
+    value: u32,
+};
+
+pub const invalidChunkID = ChunkID{
+    .value = 0xFFFFFFFF,
+};
+
+pub const Entity = struct {
     /// MSB 8 bytes are generation, rest is index
     gen_index: u32,
 };
@@ -129,18 +236,15 @@ test "Masks" {
     assert(ZCS.getComponentBit(DampenTag) == 16);
     assert(ZCS.getArchMask([_]type{ Position, Velocity, GravityTag }) == 11);
 
-    const ArchID = ZCS.ArchMask;
-    const ChunkID = struct {
-        value: u32,
-    };
-
-    const offsets = ZCS.EntityManager.layoutDesc.offsets;
-    const numItems = ZCS.EntityManager.layoutDesc.numItems;
+    const offsets = ZCS.EntityManager.chunkLayout.layout.offsets;
+    const numItems = ZCS.EntityManager.chunkLayout.layout.numItems;
     warn("Laid out chunk, {} items, offsets:\n", numItems);
     warn("Entity  {}\n", offsets[0]);
     warn("ArchID  {}\n", offsets[1]);
-    warn("ChunkID {}\n", offsets[2]);
-    const end = offsets[2] + numItems * @sizeOf(ChunkID);
-    const extra = std.mem.page_size - end;
+    const end = offsets[1] + numItems * @sizeOf(ZCS.EntityManager.ChunkSchema.ValTypeIndex(1));
+    const extra = entityChunkSize - end;
     warn("Extra bytes: {}\n", extra);
+
+    var archMan = ZCS.ArchetypeManager{};
+    _ = archMan.findAllArchetypes(0, 0);
 }
