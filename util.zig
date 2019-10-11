@@ -4,6 +4,11 @@ const assert = std.debug.assert;
 
 pub const EmptyStruct = struct {};
 
+pub fn typedSlice(comptime T: type, ptr: var, offset: usize, elemCount: usize) []T {
+    const sliceStart = adjustPtr(T, ptr, @bitCast(isize, offset));
+    return sliceStart[0..elemCount];
+}
+
 pub fn extractTypesFromUnion(comptime Type: type) [@memberCount(Type)]type {
     // ensure that the type is valid
     const info = @typeInfo(Type);

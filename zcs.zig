@@ -3,18 +3,21 @@ const os = std.os;
 const mem = std.mem;
 const assert = std.debug.assert;
 const warn = std.debug.warn;
+const ArrayList = std.ArrayList;
+
 const layout = @import("chunk_layout.zig");
 const TypeLayout = layout.TypeLayout;
 const layoutChunk = layout.layoutChunk;
 const util = @import("util.zig");
 const PageArenaAllocator = @import("page_arena_allocator.zig").PageArenaAllocator;
 const BlockHeap = @import("block_heap.zig").BlockHeap;
-const ArrayList = std.ArrayList;
+const type_meta = @import("type_meta.zig");
+const pages = @import("pages.zig");
 
-const chunkSize = 64 * 1024;
+const chunkSize = 16 * 1024;
 const entityChunkSize = 64 * 1024;
-const chunkChunkSize = mem.page_size;
-const archChunkSize = mem.page_size;
+const dataChunkSize = 8 * 1024;
+const archChunkSize = 8 * 1024;
 
 var tempAllocator = PageArenaAllocator.init(64 * 1024);
 var permAllocator = PageArenaAllocator.init(64 * 1024);
@@ -32,139 +35,204 @@ var lowMemory = false;
 ///     // component types go here
 /// });
 pub fn Schema(comptime componentTypes: []const type) type {
+    const TypeIndex = type_meta.TypeIndex(componentTypes);
+    const ArchMask = TypeIndex.ArchMask;
+    const ArchID = TypeIndex.ArchID;
+
+    const ComponentMeta = struct {
+        componentIndex: u32,
+        chunkOffset: u32,
+    };
+
+    const ChunkDataHeader = struct {
+        data: [chunkSize]u8 align(mem.page_size),
+    };
+
+    const EntityManager = struct {
+        const Self = @This();
+        const EntityData = union(enum) {
+            Chunk: ChunkID,
+            Index: u16,
+            Gen: Generation,
+        };
+        const ChunkSchema = layout.SOASchema(util.EmptyStruct, EntityData);
+        const Chunk = ChunkSchema.Chunk;
+        const chunkLayout = comptime ChunkSchema.layout(entityChunkSize);
+        const ChunkList = ArrayList(*Chunk);
+        const Item = struct {
+            chunk: *Chunk,
+            index: u32,
+
+            fn getValue(self: Item, comptime value: ChunkSchema.Values) ChunkSchema.ValType(value) {
+                return chunkLayout.getValues(self.chunk, value)[self.index];
+            }
+        };
+
+        chunks: ChunkList,
+
+        fn init() Self {
+            return Self{
+                .chunks = ChunkList.init(stdHeapAllocator),
+            };
+        }
+
+        fn resolveItem(index: u32) error{InvalidID}!Item {
+            const chunkID = index / chunkLayout.numItems;
+            const indexInChunk = index % chunkLayout.numItems;
+            if (chunkID >= self.chunks.count()) return error.InvalidID;
+            return Item{
+                .chunk = self.chunks.at(chunkID),
+                .index = indexInChunk,
+            };
+        }
+    };
+
+    const DataManager = struct {
+        const Self = @This();
+        const ChunkMetaData = union(enum) {
+            ChunkData: *ChunkDataHeader,
+            Arch: ArchID,
+            Mask: ArchMask,
+            Count: u16,
+        };
+        const ChunkSchema = layout.SOASchema(util.EmptyStruct, ChunkMetaData);
+        const Chunk = ChunkSchema.Chunk;
+        const chunkLayout = comptime ChunkSchema.layout(dataChunkSize);
+        const ChunkList = ArrayList(*Chunk);
+        const Item = struct {
+            chunk: *Chunk,
+            index: u32,
+
+            fn getValue(self: Item, comptime value: ChunkSchema.Values) ChunkSchema.ValType(value) {
+                return chunkLayout.getValues(self.chunk, value)[self.index];
+            }
+        };
+
+        chunks: ChunkList,
+
+        fn init() Self {
+            return Self{
+                .chunks = ChunkList.init(stdHeapAllocator),
+            };
+        }
+
+        fn resolveItem(index: u32) error{InvalidID}!Item {
+            const chunkID = index / chunkLayout.numItems;
+            const indexInChunk = index % chunkLayout.numItems;
+            if (chunkID >= self.chunks.count()) return error.InvalidID;
+            return Item{
+                .chunk = self.chunks.at(chunkID),
+                .index = indexInChunk,
+            };
+        }
+    };
+
+    const ArchetypeManager = struct {
+        const Self = @This();
+        const ArchetypeData = union(enum) {
+            Components: []ComponentMeta,
+            Mask: ArchMask,
+            ItemsPerChunk: u16,
+        };
+        const ChunkSchema = layout.SOASchema(util.EmptyStruct, ArchetypeData);
+        const Chunk = ChunkSchema.Chunk;
+        const chunkLayout = comptime ChunkSchema.layout(archChunkSize);
+        const ChunkList = ArrayList(*Chunk);
+        const Item = struct {
+            chunk: *Chunk,
+            index: u32,
+
+            fn getValue(self: Item, comptime value: ChunkSchema.Values) ChunkSchema.ValType(value) {
+                return chunkLayout.getValues(self.chunk, value)[self.index];
+            }
+        };
+
+        chunks: ChunkList,
+
+        fn init() Self {
+            return Self{
+                .chunks = ChunkList.init(stdHeapAllocator),
+            };
+        }
+
+        fn resolveItem(index: u32) error{InvalidID}!Item {
+            const chunkID = index / chunkLayout.numItems;
+            const indexInChunk = index % chunkLayout.numItems;
+            if (chunkID >= self.chunks.count()) return error.InvalidID;
+            return Item{
+                .chunk = self.chunks.at(chunkID),
+                .index = indexInChunk,
+            };
+        }
+    };
+
+    return ZCS(TypeIndex, EntityManager, ArchetypeManager, DataManager);
+}
+
+fn ZCS(
+    comptime _TypeIndex: type,
+    comptime _EntityManager: type,
+    comptime _ArchetypeManager: type,
+    comptime _DataManager: type,
+) type {
     return struct {
-        /// The type of archetype masks within this schema.  This is the
-        /// smallest integer type made up of a power-of-two number of bytes
-        /// that can fit a bit for each component in the componentTypes array.
-        const ArchMask = GetArchetypeMaskType(componentTypes.len);
-        const ArchID = GetArchetypeIndexType(componentTypes.len);
+        const Self = @This();
 
-        /// Returns a mask with the component bits set for each component
-        /// in the array.  Evaluates to a compile-time constant.  It is
-        /// a compile error to pass any type to this function that is not
-        /// in the componentTypes array.
-        pub fn getArchMask(comptime types: []const type) ArchMask {
-            comptime var mask: ArchMask = 0;
-            inline for (types) |CompType| {
-                mask |= comptime getComponentBit(CompType);
+        pub const TypeIndex = _TypeIndex;
+        pub const ArchMask = TypeIndex.ArchMask;
+        pub const ArchID = TypeIndex.ArchID;
+
+        pub const EntityManager = _EntityManager;
+        pub const ArchetypeManager = _ArchetypeManager;
+        pub const DataManager = _DataManager;
+
+        pub const ArchetypeChunk = struct {
+            arch: ArchetypeManager.Item,
+            data: DataManager.Item,
+
+            pub fn getEntities(self: ArchetypeChunk) []Entity {
+                const dataChunk = self.data.getValue(.ChunkData);
+                const validNum = self.data.getValue(.Count);
+                return util.typedSlice(Entity, dataChunk, 0, validNum);
             }
-            return mask;
-        }
 
-        /// Returns a mask with a single bit set to mark this component.
-        /// Evaluates to a compile-time constant.  It is a compile error
-        /// to pass a parameter to this function that is not in the
-        /// componentTypes array.
-        pub fn getComponentBit(comptime CompType: type) ArchMask {
-            return 1 << comptime getComponentIndex(CompType);
-        }
-
-        // Make sure that there are no duplicates in the list of component types
-        comptime {
-            for (componentTypes) |CompType, i| {
-                if (getComponentIndex(CompType) != i)
-                    @compileError("List of component types cannot contain duplicates");
-            }
-        }
-
-        /// Returns a unique identifier for the component type.
-        /// Identifiers start at 0 and are dense.  They are equal
-        /// to the index in the componentTypes array.  It is a compile
-        /// error to pass a parameter to this function that is not in
-        /// the componentTypes array.
-        fn getComponentIndex(comptime CompType: type) u32 {
-            for (componentTypes) |OtherType, i| {
-                if (OtherType == CompType) return i;
-            }
-            @compileError("Not a component type");
-        }
-
-        pub const EntityManager = struct {
-            const EntityData = union(enum) {
-                Chunk: ChunkID,
-                Gen: Generation,
-            };
-            const ChunkSchema = layout.SOASchema(util.EmptyStruct, EntityData);
-            const Chunk = ChunkSchema.Chunk;
-            const chunkLayout = comptime ChunkSchema.layout(entityChunkSize);
-        };
-
-        pub const ChunkManager = struct {
-            const ChunkHeader = struct {
-                next: *ChunkHeader,
-            };
-            const ChunkMetaData = union(enum) {
-                ChunkData: *ChunkDataHeader,
-                NextChunkInArchetype: ChunkID,
-                Arch: ArchID,
-            };
-            const ChunkSchema = layout.SOASchema(ChunkHeader, ChunkMetaData);
-            const Chunk = ChunkSchema.Chunk;
-            const chunkLayout = comptime ChunkSchema.layout(chunkChunkSize);
-        };
-
-        pub const ArchetypeManager = struct {
-            const Self = @This();
-
-            const ArchetypeHeader = struct {
-                next: ?*ArchetypeHeader,
-            };
-            const ArchetypeData = union(enum) {
-                Components: []ComponentMeta,
-                FirstChunk: ChunkID,
-                Mask: ArchMask,
-            };
-            const ChunkSchema = layout.SOASchema(ArchetypeHeader, ArchetypeData);
-            const Chunk = ChunkSchema.Chunk;
-            const chunkLayout = comptime ChunkSchema.layout(archChunkSize);
-
-            firstPage: ?*ArchetypeHeader = null,
-
-            /// Finds all archetypes matching an include and exclude filter.
-            /// The returned slice is valid until the temp allocator is cleared.
-            pub fn findAllArchetypes(self: Self, include: ArchMask, exclude: ArchMask) []ArchetypeChunks {
-                assert(include & exclude == 0);
-                var archList = ArrayList(ArchetypeChunks).init(stdTempAllocator);
-                const checkMask = include | exclude;
-                var pageIt = self.firstPage;
-                pageLoop: while (pageIt) |header| : (pageIt = header.next) {
-                    const chunk = chunkLayout.getChunkFromHeader(header);
-                    const components = chunkLayout.getValues(chunk, .Components);
-                    const firstChunks = chunkLayout.getValues(chunk, .FirstChunk);
-                    const masks = chunkLayout.getValues(chunk, .Mask);
-                    for (masks) |mask, i| {
-                        if (mask & checkMask == include) {
-                            if (archList.addOne()) |pItem| {
-                                pItem.* = ArchetypeChunks{
-                                    .components = components[i],
-                                    .firstChunk = firstChunks[i],
-                                };
-                            } else |err| {
-                                lowMemory = true;
-                                break :pageLoop;
-                            }
-                        }
-                    }
+            pub fn hasComponent(self: ArchetypeChunk, comptime T: type) bool {
+                const compIndex = comptime TypeIndex.getComponentIndex(T);
+                const components = self.arch.getValue(.Components);
+                for (components) |component| {
+                    if (component.componentIndex == compIndex)
+                        return true;
                 }
-                //N.B. This looks like a leak but it's not because we're
-                //using the temp allocator, where free() is a noop.
-                return archList.toSlice();
+                return false;
+            }
+
+            pub fn getComponents(self: ArchetypeChunk, comptime T: type) error{MissingComponent}![]T {
+                const compIndex = comptime TypeIndex.getComponentIndex(T);
+                const components = self.arch.getValue(.Components);
+                const offset = for (components) |component| {
+                    if (component.componentIndex == compIndex)
+                        break component.chunkOffset;
+                } else {
+                    return error.MissingComponent;
+                };
+
+                const dataChunk = self.data.getValue(.ChunkData);
+                const validNum = self.data.getValue(.Count);
+                return util.typedSlice(T, dataChunk, 0, validNum);
             }
         };
 
-        const ComponentMeta = struct {
-            componentIndex: u32,
-            chunkOffset: u32,
-        };
+        entityManager: _EntityManager,
+        archetypeManager: _ArchetypeManager,
+        dataManager: _DataManager,
 
-        const ArchetypeChunks = struct {
-            components: []ComponentMeta,
-            firstChunk: ChunkID,
-        };
-
-        pub const ChunkDataHeader = struct {
-            _notEmpty: u8 align(chunkSize),
-        };
+        pub fn init() Self {
+            return Self{
+                .entityManager = _EntityManager.init(),
+                .archetypeManager = _ArchetypeManager.init(),
+                .dataManager = _DataManager.init(),
+            };
+        }
     };
 }
 
@@ -185,27 +253,6 @@ pub const Entity = struct {
     gen_index: u32,
 };
 
-fn GetArchetypeMaskType(comptime numComponentTypes: u32) type {
-    return switch (numComponentTypes) {
-        0 => @compileError("Cannot create an ECS with 0 component types"),
-        1...8 => u8,
-        9...16 => u16,
-        17...32 => u32,
-        33...64 => u64,
-        65...128 => u128,
-        else => @compileError("Cannot create an ECS with more than 128 component types"),
-    };
-}
-
-fn GetArchetypeIndexType(comptime numComponentTypes: u32) type {
-    return switch (numComponentTypes) {
-        0 => @compileError("Cannot create an ECS with 0 component types"),
-        1...8 => u8,
-        9...16 => u16,
-        else => u32, // can't have more than 4 billion active archetypes
-    };
-}
-
 test "Masks" {
     const vec3 = struct {
         x: f32,
@@ -225,26 +272,28 @@ test "Masks" {
     const GravityTag2 = GravityTag;
     const DampenTag = struct {};
 
-    const ZCS = Schema([_]type{ Position, Velocity, Acceleration, GravityTag, DampenTag });
+    const ECS = Schema([_]type{ Position, Velocity, Acceleration, GravityTag, DampenTag });
+    const TypeIndex = ECS.TypeIndex;
 
-    assert(ZCS.ArchMask == u8);
-    assert(ZCS.getComponentBit(Position) == 1);
-    assert(ZCS.getComponentBit(Velocity) == 2);
-    assert(ZCS.getComponentBit(Acceleration) == 4);
-    assert(ZCS.getComponentBit(GravityTag) == 8);
-    assert(ZCS.getComponentBit(GravityTag2) == 8);
-    assert(ZCS.getComponentBit(DampenTag) == 16);
-    assert(ZCS.getArchMask([_]type{ Position, Velocity, GravityTag }) == 11);
+    assert(ECS.ArchMask == u8);
+    assert(TypeIndex.getComponentBit(Position) == 1);
+    assert(TypeIndex.getComponentBit(Velocity) == 2);
+    assert(TypeIndex.getComponentBit(Acceleration) == 4);
+    assert(TypeIndex.getComponentBit(GravityTag) == 8);
+    assert(TypeIndex.getComponentBit(GravityTag2) == 8);
+    assert(TypeIndex.getComponentBit(DampenTag) == 16);
+    assert(TypeIndex.getArchMask([_]type{ Position, Velocity, GravityTag }) == 11);
 
-    const offsets = ZCS.EntityManager.chunkLayout.layout.offsets;
-    const numItems = ZCS.EntityManager.chunkLayout.layout.numItems;
-    warn("Laid out chunk, {} items, offsets:\n", numItems);
-    warn("Entity  {}\n", offsets[0]);
-    warn("ArchID  {}\n", offsets[1]);
-    const end = offsets[1] + numItems * @sizeOf(ZCS.EntityManager.ChunkSchema.ValTypeIndex(1));
-    const extra = entityChunkSize - end;
-    warn("Extra bytes: {}\n", extra);
+    warn("\nLaid out chunks:\n");
+    warn("Entity {}\n", ECS.EntityManager.chunkLayout.layout.numItems);
+    warn("Arch    {}\n", ECS.ArchetypeManager.chunkLayout.layout.numItems);
+    warn("Data    {}\n", ECS.DataManager.chunkLayout.layout.numItems);
 
-    var archMan = ZCS.ArchetypeManager{};
-    _ = archMan.findAllArchetypes(0, 0);
+    const ecs = ECS.init();
+    const AC = ECS.ArchetypeChunk;
+    const ac: AC = undefined;
+    //_ = ac.getEntities();
+    //_ = try ac.getComponents(Velocity);
+    //_ = ac.hasComponent(GravityTag);
+    //_ = ecs.archetypeManager.findAllArchetypes(0, 0);
 }

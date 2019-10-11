@@ -5,6 +5,14 @@ const mem = std.mem;
 const page_allocator = std.heap.direct_allocator;
 const util = @import("util.zig");
 
+// @todo: This API has a big cache associativity problem that will
+// eventually rear its ugly head on Windows.  Most hot memory in the ECS
+// is on directly mapped pages.  Chunks are 16k and pages are 4k, so this
+// seems ok at first glance.  But on Windows, pages are aligned on 64k
+// boundaries! This means that for any cache at least 64k large, we will
+// only use a quarter of it!  Eventually we will need to allocate 64k
+// at a time and sub-allocate chunks from it.
+
 pub fn obtainAligned(size: usize, alignment: u29) ![]u8 {
     assert(util.isAligned(size, mem.page_size));
     assert(alignment >= mem.page_size);

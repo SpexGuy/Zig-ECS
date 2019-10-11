@@ -115,8 +115,7 @@ pub fn SOASchema(comptime InHeader: type, comptime InValueUnion: type) type {
         /// Get the slice of values for the given value index
         fn getValuesIndex(self: Self, chunk: *Chunk, comptime index: u32) []ValTypeIndex(index) {
             const T = ValTypeIndex(index);
-            const valuesBase = util.adjustPtr(T, chunk, self.layout.offsets[index]);
-            return valuesBase[0..self.layout.numItems];
+            return util.typedSlice(T, chunk, self.layout.offsets[index], self.layout.numItems);
         }
 
         /// Get the chunk object from a pointer to the header
