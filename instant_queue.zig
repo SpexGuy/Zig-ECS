@@ -13,12 +13,10 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
         const Self = @This();
 
         // grumble grumble
-        // we don't have control over struct layout in Zig
-        // which means these two spin-locks will probably
-        // end up on the same cache line, slowing down the
-        // single-producer single-consumer case with false
-        // sharing.  Because of this, spsc use cases should
-        // prefer a more specialized queue implementation.
+        // we don't have tight control over struct layout in Zig
+        // which means these heads and tails will probably
+        // all end up on the same cache line, which might
+        // cause some minor perf hits due to false sharing.
 
         frontHead: u32,
         backHead: u32,
