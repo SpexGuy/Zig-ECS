@@ -6,10 +6,7 @@ const assert = std.debug.assert;
 const SpinLock = std.SpinLock;
 
 /// an InstantQueue is a threadsafe queue with a fixed-size buffer.
-/// It is guaranteed never to sleep the thread.  It uses SpinLocks
-/// to enforce consistency because I'm bad at lockless concurrency.
-/// But it keeps a separate lock for enqueue and dequeue, so it can
-/// have one producer and one consumer running at a time.
+/// It is guaranteed never to sleep the thread.
 pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
     const N = MaxSize + 1;
     return struct {
@@ -23,46 +20,91 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
         // sharing.  Because of this, spsc use cases should
         // prefer a more specialized queue implementation.
 
-        headLock: SpinLock,
-        tailLock: SpinLock,
-        head: u32,
-        tail: u32,
+        frontHead: u32,
+        backHead: u32,
+        frontTail: u32,
+        backTail: u32,
         buffer: [N]T,
 
         pub fn init() Self {
             return Self{
-                .headLock = SpinLock.init(),
-                .tailLock = SpinLock.init(),
-                .head = 0,
-                .tail = N - 1,
+                .frontHead = 0,
+                .backHead = 0,
+                .frontTail = N - 1,
+                .backTail = N - 1,
                 .buffer = undefined,
             };
         }
 
         pub fn enqueue(self: *Self, value: T) error{QueueFull}!void {
-            const lock = self.headLock.acquire();
-            defer lock.release();
-            const tail = @atomicLoad(u32, &self.tail, .SeqCst);
-            var head = self.head;
-            if (head == tail) return error.QueueFull;
+            // get a slot
+            var nextHead: u32 = undefined;
+            var head = @atomicLoad(u32, &self.frontHead, .SeqCst);
+            while (true) {
+                // reload the tail after loading the head to ensure head >= tail
+                var tail = @atomicLoad(u32, &self.backTail, .SeqCst);
+
+                // check for full
+                if (head == tail) {
+                    // if reads are in progress, wait for a free slot.
+                    if (head != @atomicLoad(u32, &self.frontTail, .SeqCst)) continue;
+                    return error.QueueFull;
+                }
+
+                // calc next head
+                nextHead = head + 1;
+                if (nextHead == N) nextHead = 0;
+
+                // cmpxchg next head
+                if (@cmpxchgWeak(u32, &self.frontHead, head, nextHead, .SeqCst, .SeqCst)) |actualVal| {
+                    head = actualVal;
+                } else {
+                    break;
+                }
+            }
+
+            // copy the value
             self.buffer[head] = value;
-            head += 1;
-            if (head == N) head = 0;
-            _ = @atomicRmw(u32, &self.head, .Xchg, head, .SeqCst);
+            @fence(.SeqCst); // ensure write has completed and buffer is safe to read
+
+            // move the back head once previous writes are done
+            while (@cmpxchgWeak(u32, &self.backHead, head, nextHead, .SeqCst, .SeqCst)) |_| {}
         }
 
         pub fn dequeue(self: *Self) error{QueueEmpty}!T {
             var value: T = undefined;
             {
-                const lock = self.tailLock.acquire();
-                defer lock.release();
-                const head = @atomicLoad(u32, &self.head, .SeqCst);
-                var tail = self.tail;
-                tail += 1;
-                if (tail == N) tail = 0;
-                if (head == tail) return error.QueueEmpty;
+                // get a slot
+                var tail: u32 = undefined;
+                var lastTail = @atomicLoad(u32, &self.frontTail, .SeqCst);
+                while (true) {
+                    // reload the head after loading the tail to ensure head >= tail
+                    var head = @atomicLoad(u32, &self.backHead, .SeqCst);
+                    // calculate next tail pos
+                    tail = lastTail + 1;
+                    if (tail == N) tail = 0;
+
+                    // check for empty
+                    if (tail == head) {
+                        // if writes are in progress, wait for one to complete.
+                        if (tail != @atomicLoad(u32, &self.frontHead, .SeqCst)) continue;
+                        return error.QueueEmpty;
+                    }
+
+                    // cmpxchg next tail
+                    if (@cmpxchgWeak(u32, &self.frontTail, lastTail, tail, .SeqCst, .SeqCst)) |actualVal| {
+                        lastTail = actualVal;
+                    } else {
+                        break;
+                    }
+                }
+
+                // copy the value
                 value = self.buffer[tail];
-                _ = @atomicRmw(u32, &self.tail, .Xchg, tail, .SeqCst);
+                @fence(.SeqCst); // ensure read has completed and buffer is safe to modify
+
+                // move the back tail once previous reads are done
+                while (@cmpxchgWeak(u32, &self.backTail, lastTail, tail, .SeqCst, .SeqCst)) |_| {}
             }
             return value;
         }
@@ -103,9 +145,11 @@ test "std.atomic.Queue single-threaded" {
     }
 }
 
+const queue_size = 64;
+
 const Context = struct {
     allocator: *std.mem.Allocator,
-    queue: *InstantQueue(i32, 64),
+    queue: *InstantQueue(i32, queue_size),
     put_sum: isize,
     get_sum: isize,
     get_count: usize,
@@ -117,7 +161,7 @@ const Context = struct {
 // CI we would use a less aggressive setting since at 1 core, while we still
 // want this test to pass, we need a smaller value since there is so much thrashing
 // we would also use a less aggressive setting when running in valgrind
-const puts_per_thread = 500;
+const puts_per_thread = 5000;
 const put_thread_count = 3;
 
 test "std.atomic.Queue" {
@@ -127,7 +171,7 @@ test "std.atomic.Queue" {
     var fixed_buffer_allocator = std.heap.ThreadSafeFixedBufferAllocator.init(plenty_of_memory);
     var a = &fixed_buffer_allocator.allocator;
 
-    var queue = InstantQueue(i32, 64).init();
+    var queue = InstantQueue(i32, queue_size).init();
     var context = Context{
         .allocator = a,
         .queue = &queue,
@@ -188,6 +232,7 @@ test "std.atomic.Queue" {
 fn startPuts(ctx: *Context) u8 {
     var put_count: usize = puts_per_thread;
     var r = std.rand.DefaultPrng.init(0xdeadbeef);
+    var fullCount: u24 = 0;
     while (put_count != 0) : (put_count -= 1) {
         std.time.sleep(1); // let the os scheduler be our fuzz
         const x = @bitCast(i32, r.random.scalar(u32));
@@ -195,7 +240,12 @@ fn startPuts(ctx: *Context) u8 {
             if (ctx.queue.enqueue(x)) {
                 _ = @atomicRmw(isize, &ctx.put_sum, builtin.AtomicRmwOp.Add, x, AtomicOrder.SeqCst);
                 break;
-            } else |err| {}
+            } else |err| {
+                fullCount +%= 1;
+                if (fullCount == 0) {
+                    std.debug.warn("queue full: {}\n", ctx.queue.*);
+                }
+            }
         }
     }
     return 0;
@@ -204,11 +254,15 @@ fn startPuts(ctx: *Context) u8 {
 fn startGets(ctx: *Context) u8 {
     while (true) {
         const last = @atomicLoad(u8, &ctx.puts_done, builtin.AtomicOrder.SeqCst) == 1;
+        var emptyCount: u24 = 0;
 
         while (ctx.queue.dequeue()) |data| {
             _ = @atomicRmw(isize, &ctx.get_sum, builtin.AtomicRmwOp.Add, data, builtin.AtomicOrder.SeqCst);
             _ = @atomicRmw(usize, &ctx.get_count, builtin.AtomicRmwOp.Add, 1, builtin.AtomicOrder.SeqCst);
-        } else |err| {}
+        } else |err| {
+            emptyCount +%= 1;
+            if (emptyCount == 0) std.debug.warn("queue empty\n");
+        }
 
         if (last) return 0;
     }
