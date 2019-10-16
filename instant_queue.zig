@@ -18,10 +18,15 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
         // all end up on the same cache line, which might
         // cause some minor perf hits due to false sharing.
 
+		/// The next head index to write to
         frontHead: u32,
+		/// The first safe head index to read from
         backHead: u32,
+		/// One before the next tail index to read from
         frontTail: u32,
+		/// One before the first safe tail index to write to
         backTail: u32,
+		/// Data storage
         buffer: [N]T,
 
         pub fn init() Self {
