@@ -105,7 +105,7 @@ test "std.atomic.Queue single-threaded" {
 
 const Context = struct {
     allocator: *std.mem.Allocator,
-    queue: *InstantQueue(i32, 1),
+    queue: *InstantQueue(i32, 64),
     put_sum: isize,
     get_sum: isize,
     get_count: usize,
@@ -127,7 +127,7 @@ test "std.atomic.Queue" {
     var fixed_buffer_allocator = std.heap.ThreadSafeFixedBufferAllocator.init(plenty_of_memory);
     var a = &fixed_buffer_allocator.allocator;
 
-    var queue = InstantQueue(i32, 1).init();
+    var queue = InstantQueue(i32, 64).init();
     var context = Context{
         .allocator = a,
         .queue = &queue,
