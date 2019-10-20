@@ -12,61 +12,100 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
     return struct {
         const Self = @This();
 
-        // grumble grumble
-        // we don't have tight control over struct layout in Zig
-        // which means these heads and tails will probably
-        // all end up on the same cache line, which might
-        // cause some minor perf hits due to false sharing.
+        /// frontHead is the next head index to write to
+        /// backTail is one before the first safe tail index to write to
+        /// These values must both be read atomically in enqueue, so they
+        /// have been packed into one integer.
+        frontHeadBackTail: u64,
 
-        /// The next head index to write to
-        frontHead: u32,
-
-        /// The first safe head index to read from
-        backHead: u32,
-
-        /// One before the next tail index to read from
-        frontTail: u32,
-
-        /// One before the first safe tail index to write to
-        backTail: u32,
+        /// frontTail is one before the next tail index to read from
+        /// backHead is the first safe head index to read from
+        /// These values must both be read atomically in dequeue, so they
+        /// have been packed into one integer.
+        frontTailBackHead: u64,
 
         /// Data storage
         buffer: [N]T,
 
         pub fn init() Self {
             return Self{
-                .frontHead = 0,
-                .backHead = 0,
-                .frontTail = N - 1,
-                .backTail = N - 1,
+                .frontHeadBackTail = N - 1,
+                .frontTailBackHead = u64(N - 1) << 32,
                 .buffer = undefined,
             };
         }
 
+        /// NOT THREAD SAFE! Enqueues an item.
+        pub fn enqueueUnsafe(self: *Self, value: T) error{QueueFull}!void {
+            var head = self.frontHeadBackTail >> 32;
+            const tail = self.frontHeadBackTail & 0xFFFFFFFF;
+
+            if (head == tail)
+                return error.QueueFull;
+
+            self.buffer[head] = value;
+
+            head += 1;
+            if (head == N) head = 0;
+
+            self.frontHeadBackTail = (head << 32) | tail;
+            self.frontTailBackHead = (tail << 32) | head;
+        }
+
+        /// NOT THREAD SAFE! Dequeues an item.
+        pub fn dequeueUnsafe(self: *Self) error{QueueEmpty}!T {
+            var tail = self.frontHeadBackTail & 0xFFFFFFFF;
+            const head = self.frontHeadBackTail >> 32;
+
+            tail += 1;
+            if (tail == N) tail = 0;
+
+            if (tail == head)
+                return error.QueueEmpty;
+
+            self.frontHeadBackTail = (head << 32) | tail;
+            self.frontTailBackHead = (tail << 32) | head;
+
+            return self.buffer[tail];
+        }
+
+        /// Thread safe. Enqueues a single item. If the queue is full,
+        /// returns error.QueueFull.
         pub fn enqueue(self: *Self, value: T) error{QueueFull}!void {
             // get a slot
             var nextHead: u32 = undefined;
-            var head = @atomicLoad(u32, &self.frontHead, .SeqCst);
-            while (true) {
-                // reload the tail after loading the head to ensure head >= tail
-                var tail = @atomicLoad(u32, &self.backTail, .SeqCst);
+            var head: u32 = undefined;
+            {
+                var fhbt = @atomicLoad(u64, &self.frontHeadBackTail, .SeqCst);
+                while (true) {
+                    // reload the tail after loading the head to ensure head >= tail
+                    head = @truncate(u32, fhbt >> 32);
+                    const tail = @truncate(u32, fhbt);
 
-                // check for full
-                if (head == tail) {
-                    // if reads are in progress, wait for a free slot.
-                    if (head != @atomicLoad(u32, &self.frontTail, .SeqCst)) continue;
-                    return error.QueueFull;
-                }
+                    // check for full
+                    if (head == tail) {
+                        // if reads are in progress, wait for a free slot.
+                        const ftbh = @atomicLoad(u64, &self.frontTailBackHead, .SeqCst);
+                        const frontTail = @truncate(u32, ftbh >> 32);
+                        if (head != frontTail) {
+                            fhbt = @atomicLoad(u64, &self.frontHeadBackTail, .SeqCst);
+                            continue;
+                        }
+                        return error.QueueFull;
+                    }
 
-                // calc next head
-                nextHead = head + 1;
-                if (nextHead == N) nextHead = 0;
+                    // calc next head
+                    nextHead = head + 1;
+                    if (nextHead == N) nextHead = 0;
 
-                // cmpxchg next head
-                if (@cmpxchgWeak(u32, &self.frontHead, head, nextHead, .SeqCst, .SeqCst)) |actualVal| {
-                    head = actualVal;
-                } else {
-                    break;
+                    const nextFhbt = (u64(nextHead) << 32) | tail;
+
+                    // cmpxchg next head
+                    if (@cmpxchgWeak(u64, &self.frontHeadBackTail, fhbt, nextFhbt, .SeqCst, .SeqCst)) |actualVal| {
+                        fhbt = actualVal;
+                    } else {
+                        break;
+                    }
                 }
             }
 
@@ -75,34 +114,59 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
             @fence(.SeqCst); // ensure write has completed and buffer is safe to read
 
             // move the back head once previous writes are done
-            while (@cmpxchgWeak(u32, &self.backHead, head, nextHead, .SeqCst, .SeqCst)) |_| {}
+            {
+                var ftbh = @atomicLoad(u64, &self.frontTailBackHead, .SeqCst);
+                while (true) {
+                    const lastFtbh = (ftbh & ~u64(0xFFFFFFFF)) | head;
+                    const nextFtbh = (ftbh & ~u64(0xFFFFFFFF)) | nextHead;
+                    if (@cmpxchgWeak(u64, &self.frontTailBackHead, lastFtbh, nextFtbh, .SeqCst, .SeqCst)) |actualVal| {
+                        ftbh = actualVal;
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
 
+        /// Thread safe. Dequeues a single item. If the queue is empty,
+        /// returns error.QueueEmpty.
         pub fn dequeue(self: *Self) error{QueueEmpty}!T {
             var value: T = undefined;
             {
                 // get a slot
                 var tail: u32 = undefined;
-                var lastTail = @atomicLoad(u32, &self.frontTail, .SeqCst);
-                while (true) {
-                    // reload the head after loading the tail to ensure head >= tail
-                    var head = @atomicLoad(u32, &self.backHead, .SeqCst);
-                    // calculate next tail pos
-                    tail = lastTail + 1;
-                    if (tail == N) tail = 0;
+                var lastTail: u32 = undefined;
+                {
+                    var ftbh = @atomicLoad(u64, &self.frontTailBackHead, .SeqCst);
+                    while (true) {
+                        // reload the tail after loading the head to ensure head >= tail
+                        lastTail = @truncate(u32, ftbh >> 32);
+                        const head = @truncate(u32, ftbh);
 
-                    // check for empty
-                    if (tail == head) {
-                        // if writes are in progress, wait for one to complete.
-                        if (tail != @atomicLoad(u32, &self.frontHead, .SeqCst)) continue;
-                        return error.QueueEmpty;
-                    }
+                        // calculate next tail pos
+                        tail = lastTail + 1;
+                        if (tail == N) tail = 0;
 
-                    // cmpxchg next tail
-                    if (@cmpxchgWeak(u32, &self.frontTail, lastTail, tail, .SeqCst, .SeqCst)) |actualVal| {
-                        lastTail = actualVal;
-                    } else {
-                        break;
+                        // check for empty
+                        if (tail == head) {
+                            // if reads are in progress, wait for a free slot.
+                            const fhbt = @atomicLoad(u64, &self.frontHeadBackTail, .SeqCst);
+                            const frontHead = @truncate(u32, fhbt >> 32);
+                            if (tail != frontHead) {
+                                ftbh = @atomicLoad(u64, &self.frontTailBackHead, .SeqCst);
+                                continue;
+                            }
+                            return error.QueueEmpty;
+                        }
+
+                        const nextFtbh = (u64(tail) << 32) | head;
+
+                        // cmpxchg next head
+                        if (@cmpxchgWeak(u64, &self.frontTailBackHead, ftbh, nextFtbh, .SeqCst, .SeqCst)) |actualVal| {
+                            ftbh = actualVal;
+                        } else {
+                            break;
+                        }
                     }
                 }
 
@@ -111,7 +175,18 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
                 @fence(.SeqCst); // ensure read has completed and buffer is safe to modify
 
                 // move the back tail once previous reads are done
-                while (@cmpxchgWeak(u32, &self.backTail, lastTail, tail, .SeqCst, .SeqCst)) |_| {}
+                {
+                    var fhbt = @atomicLoad(u64, &self.frontHeadBackTail, .SeqCst);
+                    while (true) {
+                        const lastFhbt = (fhbt & ~u64(0xFFFFFFFF)) | lastTail;
+                        const nextFhbt = (fhbt & ~u64(0xFFFFFFFF)) | tail;
+                        if (@cmpxchgWeak(u64, &self.frontHeadBackTail, lastFhbt, nextFhbt, .SeqCst, .SeqCst)) |actualVal| {
+                            fhbt = actualVal;
+                        } else {
+                            break;
+                        }
+                    }
+                }
             }
             return value;
         }
