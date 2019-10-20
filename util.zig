@@ -57,6 +57,24 @@ pub fn adjustPtr(comptime T: type, ptr: var, offset: isize) [*]T {
     return @intToPtr([*]T, adjusted);
 }
 
+/// like ptrCast, but can remove const and doesn't validate alignment.
+/// BEWARE: writing to data that is referenced from a const pointer
+/// is UB in Zig, so even if you remove the const from a pointer,
+/// you must not write to it.  This can still be useful for packing
+/// opaque pointers into generic locations when you can ensure at
+/// runtime that they will not be dereferenced or written to.
+/// The user must also ensure that the input pointer is either aligned
+/// according to the requirements of the result type, or will not be
+/// dereferenced, since dereferencing an unaligned pointer is UB.
+pub fn unsafePtrCast(comptime T: type, ptr: var) T {
+    comptime {
+        assert(@sizeOf(T) == @sizeOf(@typeOf(ptr)));
+    }
+    var result: T = undefined;
+    @memcpy(@ptrCast([*]u8, &result), @ptrCast([*]const u8, &ptr), @sizeOf(T));
+    return result;
+}
+
 /// Return ptrB - ptrA, in bytes.  Remember argument order with:
 /// if a is before b, result is positive.
 pub fn ptrDiff(ptrA: var, ptrB: var) isize {
