@@ -29,7 +29,7 @@ pub const JobInterface = struct {
     jobID: JobID,
 
     pub fn addSubJob(self: JobInterface, param: var, comptime func: fn (JobInterface, @typeOf(param)) void) JobID {
-        return self.addSubJobWithDeps(func, param, util.emptySlice(JobID));
+        return self.addSubJobWithDeps(param, func, util.emptySlice(JobID));
     }
 
     pub fn addSubJobWithDeps(self: JobInterface, param: var, comptime func: fn (JobInterface, @typeOf(param)) void, deps: []const JobID) JobID {
