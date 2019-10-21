@@ -13,6 +13,7 @@ const PageArenaAllocator = @import("page_arena_allocator.zig").PageArenaAllocato
 const BlockHeap = @import("block_heap.zig").BlockHeap;
 const type_meta = @import("type_meta.zig");
 const pages = @import("pages.zig");
+const jobs = @import("job_system.zig");
 
 const chunkSize = 16 * 1024;
 const entityChunkSize = 64 * 1024;
@@ -76,7 +77,7 @@ pub fn Schema(comptime componentTypes: []const type) type {
             };
         }
 
-        fn resolveItem(index: u32) error{InvalidID}!Item {
+        fn resolveItem(self: Self, index: u32) error{InvalidID}!Item {
             const chunkID = index / chunkLayout.numItems;
             const indexInChunk = index % chunkLayout.numItems;
             if (chunkID >= self.chunks.count()) return error.InvalidID;
@@ -116,7 +117,7 @@ pub fn Schema(comptime componentTypes: []const type) type {
             };
         }
 
-        fn resolveItem(index: u32) error{InvalidID}!Item {
+        fn resolveItem(self: Self, index: u32) error{InvalidID}!Item {
             const chunkID = index / chunkLayout.numItems;
             const indexInChunk = index % chunkLayout.numItems;
             if (chunkID >= self.chunks.count()) return error.InvalidID;
@@ -155,9 +156,9 @@ pub fn Schema(comptime componentTypes: []const type) type {
             };
         }
 
-        fn resolveItem(index: u32) error{InvalidID}!Item {
-            const chunkID = index / chunkLayout.numItems;
-            const indexInChunk = index % chunkLayout.numItems;
+        fn resolveItem(self: Self, index: u32) error{InvalidID}!Item {
+            const chunkID = index / chunkLayout.layout.numItems;
+            const indexInChunk = index % chunkLayout.layout.numItems;
             if (chunkID >= self.chunks.count()) return error.InvalidID;
             return Item{
                 .chunk = self.chunks.at(chunkID),
@@ -186,9 +187,17 @@ fn ZCS(
         pub const ArchetypeManager = _ArchetypeManager;
         pub const DataManager = _DataManager;
 
+        pub const JobSystem = jobs.JobSystem;
+        pub const JobID = jobs.JobID;
+        pub const JobInterface = jobs.JobInterface;
+
         pub const ArchetypeChunk = struct {
             arch: ArchetypeManager.Item,
             data: DataManager.Item,
+
+            pub fn getCount(self: ArchetypeChunk) u32 {
+                return self.data.getValue(.Count);
+            }
 
             pub fn getEntities(self: ArchetypeChunk) []Entity {
                 const dataChunk = self.data.getValue(.ChunkData);
@@ -225,13 +234,135 @@ fn ZCS(
         entityManager: _EntityManager,
         archetypeManager: _ArchetypeManager,
         dataManager: _DataManager,
+        jobSystem: JobSystem,
 
-        pub fn init() Self {
-            return Self{
+        pub fn init(numJobThreads: u32) !Self {
+            var self = Self{
                 .entityManager = _EntityManager.init(),
                 .archetypeManager = _ArchetypeManager.init(),
                 .dataManager = _DataManager.init(),
+                .jobSystem = JobSystem.init(stdHeapAllocator),
             };
+            try self.jobSystem.startup(numJobThreads);
+            return self;
+        }
+
+        pub fn forEntitiesWithData(self: *Self, data: var, comptime func: var, deps: []const JobID) JobID {
+            return self.forEntitiesWithDataExclude(0, data, func, deps);
+        }
+
+        pub fn forEntitiesWithDataExclude(self: *Self, excludeMask: ArchMask, data: var, comptime func: var, deps: []const JobID) JobID {
+            const ExtraData = @typeOf(data);
+            const FuncType = @typeOf(func);
+
+            // Get the type of the second argument to func
+            const ComponentStruct = switch (@typeInfo(FuncType)) {
+                .Fn, .BoundFn => |funcInfo| Blk: {
+                    if (funcInfo.return_type.? != void) @compileError("parameter func must not return a value");
+                    if (funcInfo.args.len != 2) @compileError("parameter func must take two arguments");
+                    if (funcInfo.args[0].arg_type.? != ExtraData) @compileError("parameter func must take data as its first argument");
+                    break :Blk funcInfo.args[1].arg_type.?;
+                },
+                else => @compileError("parameter func must be a function"),
+            };
+
+            // Get the struct info for that argument
+            const componentInfo = switch (@typeInfo(ComponentStruct)) {
+                .Struct => |structInfo| structInfo,
+                else => @compileError("second argument to func must be a struct of components"),
+            };
+
+            // Get the mask for the set of needed components
+            comptime var includeMask: ArchMask = 0;
+            inline for (componentInfo.fields) |field| {
+                includeMask |= comptime TypeIndex.getComponentBit(field.field_type.Child);
+            }
+
+            assert(includeMask & excludeMask == 0);
+
+            // Generate parameter data layouts for the job system
+            const SpawnQueryData = struct {
+                self: *Self,
+                excludeMask: ArchMask,
+                data: ExtraData,
+            };
+            const QueryData = struct {
+                self: *Self,
+                chunk: *DataManager.Chunk,
+                excludeMask: ArchMask,
+                data: ExtraData,
+            };
+            const ChunkData = struct {
+                chunk: ArchetypeChunk,
+                data: ExtraData,
+            };
+
+            // Generate code for the job functions
+            const Adapter = struct {
+                // Root job: for each chunk of chunks, run queryJob
+                fn spawnQueryJobs(job: JobInterface, jobData: SpawnQueryData) void {
+                    for (jobData.self.dataManager.chunks.toSlice()) |chunk| {
+                        const subData = QueryData{
+                            .self = jobData.self,
+                            .chunk = chunk,
+                            .excludeMask = jobData.excludeMask,
+                            .data = jobData.data,
+                        };
+                        _ = job.addSubJob(subData, queryJob);
+                    }
+                }
+                // for each chunk, if its archetype matches our requirements, run rawChunkJob
+                fn queryJob(job: JobInterface, jobData: QueryData) void {
+                    const archIDs = DataManager.chunkLayout.getValues(jobData.chunk, .Arch);
+                    const masks = DataManager.chunkLayout.getValues(jobData.chunk, .Mask);
+                    const careMask = includeMask | jobData.excludeMask;
+                    for (masks) |mask, i| {
+                        if (mask & careMask == includeMask) {
+                            const subData = ChunkData{
+                                .chunk = ArchetypeChunk{
+                                    .arch = jobData.self.archetypeManager.resolveItem(archIDs[i]) catch unreachable,
+                                    .data = DataManager.Item{
+                                        .chunk = jobData.chunk,
+                                        .index = @intCast(u32, i),
+                                    },
+                                },
+                                .data = jobData.data,
+                            };
+                            _ = job.addSubJob(subData, rawChunkJob);
+                        }
+                    }
+                }
+                // for each item in the chunk, run the job function
+                fn rawChunkJob(job: JobInterface, jobData: ChunkData) void {
+                    // get the data pointers for the chunks
+                    var componentPtrs: [componentInfo.fields.len][*]u8 = undefined;
+                    inline for (componentInfo.fields) |field, i| {
+                        const slice = jobData.chunk.getComponents(field.field_type.Child) catch unreachable;
+                        componentPtrs[i] = @ptrCast([*]u8, slice.ptr);
+                    }
+
+                    const numInChunk = jobData.chunk.getCount();
+
+                    var chunkIndex: u32 = 0;
+                    while (chunkIndex < numInChunk) : (chunkIndex += 1) {
+                        var components: ComponentStruct = undefined;
+                        inline for (componentInfo.fields) |field, i| {
+                            const typedPtr = @ptrCast([*]field.field_type.Child, @alignCast(@alignOf(field.field_type.Child), componentPtrs[i]));
+                            @field(components, field.name) = &typedPtr[i];
+                        }
+                        @inlineCall(func, jobData.data, components);
+                    }
+                }
+            };
+
+            // Schedule the job
+            const jobData = SpawnQueryData{
+                .self = self,
+                .excludeMask = excludeMask,
+                .data = data,
+            };
+
+            return self.jobSystem.scheduleWithDeps(jobData, Adapter.spawnQueryJobs, deps);
         }
     };
 }
@@ -272,6 +403,17 @@ test "Masks" {
     const GravityTag2 = GravityTag;
     const DampenTag = struct {};
 
+    const Jobs = struct {
+        fn accVel(dt: f32, entity: struct {
+            acc: *Acceleration,
+            vel: *Velocity,
+        }) void {
+            entity.vel.vel.x += entity.acc.acc.x * dt;
+            entity.vel.vel.y += entity.acc.acc.y * dt;
+            entity.vel.vel.z += entity.acc.acc.z * dt;
+        }
+    };
+
     const ECS = Schema([_]type{ Position, Velocity, Acceleration, GravityTag, DampenTag });
     const TypeIndex = ECS.TypeIndex;
 
@@ -289,7 +431,9 @@ test "Masks" {
     warn("Arch    {}\n", ECS.ArchetypeManager.chunkLayout.layout.numItems);
     warn("Data    {}\n", ECS.DataManager.chunkLayout.layout.numItems);
 
-    const ecs = ECS.init();
+    var ecs = try ECS.init(0);
+    _ = ecs.forEntitiesWithData(f32(0.16666), Jobs.accVel, util.emptySlice(ECS.JobID));
+
     const AC = ECS.ArchetypeChunk;
     const ac: AC = undefined;
     //_ = ac.getEntities();
