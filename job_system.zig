@@ -67,17 +67,30 @@ pub const JobSystem = struct {
 
     const ShortJobQueue = InstantQueue(u16, NUM_JOBS + 64);
 
+    // statistics
+    jobsExecuted: AtomicInt(u32),
+    externalAllocs: AtomicInt(u32),
+    expansionsAllocated: AtomicInt(u32),
+    maxPendingJobs: AtomicInt(u32),
+
+    // small stuff
     mainThread: Thread.Id,
     state: SystemState,
     pendingJobs: AtomicInt(u16),
-    threadState: []align(64) ThreadState,
     allocator: *Allocator,
+    threadState: []align(64) ThreadState,
+
+    // big arrays
     jobs: [NUM_JOBS]JobDesc align(64),
     freeJobs: ShortJobQueue,
     readyToRunJobs: ShortJobQueue,
 
     pub fn init(allocator: *Allocator) JobSystem {
         var self = JobSystem{
+            .jobsExecuted = AtomicInt(u32).init(0),
+            .externalAllocs = AtomicInt(u32).init(0),
+            .expansionsAllocated = AtomicInt(u32).init(0),
+            .maxPendingJobs = AtomicInt(u32).init(0),
             .mainThread = Thread.getCurrentId(),
             .state = .NotStarted,
             .pendingJobs = AtomicInt(u16).init(0),
@@ -356,6 +369,8 @@ pub const JobSystem = struct {
             },
         }
 
+        _ = self.jobsExecuted.incr();
+
         return self.releasePermits(job, jobID);
     }
 
@@ -457,7 +472,12 @@ pub const JobSystem = struct {
             warn("ERROR: self=\n{}\n", self.*);
             std.debug.panic("No more jobs for an expansion slot!");
         };
-        _ = self.pendingJobs.incr();
+
+        _ = self.expansionsAllocated.incr();
+
+        const pending = self.pendingJobs.incr() + 1;
+        _ = @atomicRmw(u32, &self.maxPendingJobs.unprotected_value, .Max, pending, .SeqCst);
+
         const job = self.getJobDescShort(shortID);
         assert(job.state == .Free);
         job.state = .WaitingForChildren;
@@ -471,7 +491,10 @@ pub const JobSystem = struct {
             warn("ERROR: self=\n{}\n", self.*);
             std.debug.panic("No more jobs!");
         };
-        _ = self.pendingJobs.incr();
+
+        const pending = self.pendingJobs.incr();
+        _ = @atomicRmw(u32, &self.maxPendingJobs.unprotected_value, .Max, pending, .SeqCst);
+
         const job = self.getJobDescShort(shortID);
         assert(job.state == .Free);
         job.state = .NotStarted;
@@ -491,6 +514,7 @@ pub const JobSystem = struct {
                 @memcpy(&job.paramData, rawParam, size);
                 job.paramPos = .Internal;
             } else {
+                _ = self.externalAllocs.incr();
                 // allocate the new value
                 const slice = self.allocator.alignedAlloc(u8, alignment, size) catch std.debug.panic("Out of memory for job param!");
                 // copy param data to the new allocation
@@ -545,11 +569,13 @@ pub const JobSystem = struct {
 };
 
 test "job system" {
+    const Timer = std.time.Timer;
     const allocator = std.heap.direct_allocator;
 
     var system = JobSystem.init(allocator);
     try system.startup(@intCast(u32, Thread.cpuCount() catch 4) - 1);
 
+    var timer = try Timer.start();
     var c: u32 = 0;
     while (c < 5000) : (c += 1) {
         var print0 = system.schedule("In a job!"[0..], printJob);
@@ -571,7 +597,17 @@ test "job system" {
         _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
         system.flush();
     }
+    const elapsed = timer.read();
     system.shutdown();
+
+    // std.debug.warn(
+    //     "\nProcessed {} tasks (peak {}, expansions {})\nTotal time: {}mS\nAvg time: {}nS\n",
+    //     system.jobsExecuted.get(),
+    //     system.maxPendingJobs.get(),
+    //     system.expansionsAllocated.get(),
+    //     elapsed / 1000 / 1000,
+    //     elapsed / system.jobsExecuted.get(),
+    // );
 }
 
 fn printSubJob(job: JobInterface, str: []const u8) void {
