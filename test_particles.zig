@@ -1,10 +1,7 @@
 const std = @import("std");
 
-const Vec3 = extern struct {
-    x: f32,
-    y: f32,
-    z: f32,
-};
+const Vec = @import("vec.zig");
+const Vec3 = Vec.Vec3;
 
 const Position = struct {
     value: Vec3,
@@ -18,8 +15,8 @@ const Velocity = struct {
     value: Vec3,
 };
 
-const Acceleration = struct {
-    value: Vec3,
+const Brownian = struct {
+    scale: f32,
 };
 
 const Sprite = struct {
@@ -43,6 +40,10 @@ const Size = struct {
     height: f32,
 };
 
+const Speed = struct {
+    value: f32,
+};
+
 const Gravity = struct {
     force: f32,
 };
@@ -58,7 +59,7 @@ const Lifetime = struct {
 const Schema = @import("zcs.zig").Schema([_]type{
     Position,
     Velocity,
-    Acceleration,
+    Brownian,
     Sprite,
     Scale,
     Color,
@@ -73,7 +74,35 @@ test "particles" {
     const numCores = std.Thread.cpuCount() catch 4;
     var world = Schema.init();
     try world.startJobSystem(@intCast(u32, numCores - 1));
+
+    const clearJob = world.forEntities(resetVelocity);
+    const lifetime = world.forEntities(tickLifetime);
+    const position = world.forEntities(updatePosition);
+
     defer world.shutdown();
 
     // TODO entity tests go here
+}
+
+var TimeDelta: f32 = 0.016666;
+
+fn resetVelocity(entity: struct {
+    vel: *Velocity,
+}) void {
+    entity.vel.* = Velocity{
+        .value = Vec3.Zero,
+    };
+}
+
+fn tickLifetime(entity: struct {
+    life: *Lifetime,
+}) void {
+    entity.life.timeLeft -= TimeDelta;
+}
+
+fn updatePosition(entity: struct {
+    vel: *const Velocity,
+    pos: *Position,
+}) void {
+    entity.pos.value = entity.pos.value.add(entity.vel.value.scale(TimeDelta));
 }
