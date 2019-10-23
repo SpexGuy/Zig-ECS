@@ -236,15 +236,23 @@ fn ZCS(
         dataManager: _DataManager,
         jobSystem: JobSystem,
 
-        pub fn init(numJobThreads: u32) !Self {
+        pub fn init() Self {
             var self = Self{
                 .entityManager = _EntityManager.init(),
                 .archetypeManager = _ArchetypeManager.init(),
                 .dataManager = _DataManager.init(),
                 .jobSystem = JobSystem.init(stdHeapAllocator),
             };
-            try self.jobSystem.startup(numJobThreads);
             return self;
+        }
+
+        pub fn startJobSystem(self: *Self, numThreads: u32) !void {
+            try self.jobSystem.startup(numThreads);
+        }
+
+        pub fn shutdown(self: *Self) void {
+            warn("shutting down ZCS\n");
+            self.jobSystem.shutdown();
         }
 
         pub fn forEntitiesWithData(self: *Self, data: var, comptime func: var, deps: []const JobID) JobID {
@@ -431,8 +439,10 @@ test "Masks" {
     warn("Arch    {}\n", ECS.ArchetypeManager.chunkLayout.layout.numItems);
     warn("Data    {}\n", ECS.DataManager.chunkLayout.layout.numItems);
 
-    var ecs = try ECS.init(0);
+    var ecs = ECS.init();
+    try ecs.startJobSystem(0);
     _ = ecs.forEntitiesWithData(f32(0.16666), Jobs.accVel, util.emptySlice(ECS.JobID));
+    ecs.shutdown();
 
     const AC = ECS.ArchetypeChunk;
     const ac: AC = undefined;

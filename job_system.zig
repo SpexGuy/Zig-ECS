@@ -577,7 +577,7 @@ test "job system" {
 
     var timer = try Timer.start();
     var c: u32 = 0;
-    while (c < 5000) : (c += 1) {
+    while (c < 1000) : (c += 1) {
         var print0 = system.schedule("In a job!"[0..], printJob);
         var print1 = system.scheduleWithDeps("In job 2!"[0..], printJob, [_]JobID{print0});
         _ = system.scheduleWithDeps("INVALID"[0..], printSubJob, [_]JobID{print1});
