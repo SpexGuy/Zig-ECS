@@ -255,11 +255,75 @@ fn ZCS(
             self.jobSystem.shutdown();
         }
 
-        pub fn forEntitiesWithData(self: *Self, data: var, comptime func: var, deps: []const JobID) JobID {
-            return self.forEntitiesWithDataExclude(0, data, func, deps);
+        pub fn forEntities(self: *Self, comptime func: var) JobID {
+            return self.forEntitiesExcludeWithDeps(0, func, util.emptySlice(JobID));
         }
 
-        pub fn forEntitiesWithDataExclude(self: *Self, excludeMask: ArchMask, data: var, comptime func: var, deps: []const JobID) JobID {
+        pub fn forEntitiesExclude(self: *Self, excludeMask: ArchMask, comptime func: var) JobID {
+            return self.forEntitiesExcludeWithDeps(excludeMask, func, util.emptySlice(JobID));
+        }
+
+        pub fn forEntitiesWithDep(self: *Self, comptime func: var, dep: JobID) JobID {
+            return self.forEntitiesExcludeWithDeps(0, func, [_]JobID{dep});
+        }
+
+        pub fn forEntitiesWithDeps(self: *Self, comptime func: var, deps: []const JobID) JobID {
+            return self.forEntitiesExcludeWithDeps(0, func, deps);
+        }
+
+        pub fn forEntitiesExcludeWithDep(self: *Self, excludeMask: ArchMask, comptime func: var, dep: JobID) JobID {
+            return self.forEntitiesExcludeWithDeps(excludeMask, func, [_]JobID{dep});
+        }
+
+        pub fn forEntitiesExcludeWithDeps(self: *Self, excludeMask: ArchMask, comptime func: var, deps: []const JobID) JobID {
+            const FuncType = @typeOf(func);
+
+            // Get the type of the second argument to func
+            const ComponentStruct = switch (@typeInfo(FuncType)) {
+                .Fn, .BoundFn => |funcInfo| Blk: {
+                    if (funcInfo.return_type.? != void) @compileError("parameter func must not return a value");
+                    if (funcInfo.args.len != 1) @compileError("parameter func must take one argument");
+                    break :Blk funcInfo.args[0].arg_type.?;
+                },
+                else => @compileError("parameter func must be a function"),
+            };
+
+            // This gives a better error message than letting it get validated later
+            const componentInfo = switch (@typeInfo(ComponentStruct)) {
+                .Struct => |structInfo| structInfo,
+                else => @compileError("parameter to func must be a struct of components"),
+            };
+
+            const Codegen = struct {
+                fn dataAdapter(_: util.EmptyStruct, data: ComponentStruct) void {
+                    @inlineCall(func, data);
+                }
+            };
+
+            return self.forEntitiesWithDataExcludeWithDeps(excludeMask, util.EmptyStruct{}, Codegen.dataAdapter, deps);
+        }
+
+        pub fn forEntitiesWithData(self: *Self, data: var, comptime func: var) JobID {
+            return self.forEntitiesWithDataExcludeWithDeps(0, data, func, util.emptySlice(JobID));
+        }
+
+        pub fn forEntitiesWithDataExclude(self: *Self, excludeMask: ArchMask, data: var, comptime func: var) JobID {
+            return self.forEntitiesWithDataExcludeWithDeps(excludeMask, data, func, util.emptySlice(JobID));
+        }
+
+        pub fn forEntitiesWithDataWithDep(self: *Self, data: var, comptime func: var, dep: JobID) JobID {
+            return self.forEntitiesWithDataExcludeWithDeps(0, data, func, [_]JobID{dep});
+        }
+
+        pub fn forEntitiesWithDataWithDeps(self: *Self, data: var, comptime func: var, deps: []const JobID) JobID {
+            return self.forEntitiesWithDataExcludeWithDeps(0, data, func, deps);
+        }
+
+        pub fn forEntitiesWithDataExcludeWithDep(self: *Self, excludeMask: ArchMask, data: var, comptime func: var, dep: JobID) JobID {
+            return self.forEntitiesWithDataExcludeWithDeps(excludeMask, data, func, [_]JobID{dep});
+        }
+
+        pub fn forEntitiesWithDataExcludeWithDeps(self: *Self, excludeMask: ArchMask, data: var, comptime func: var, deps: []const JobID) JobID {
             const ExtraData = @typeOf(data);
             const FuncType = @typeOf(func);
 
@@ -412,8 +476,13 @@ test "Masks" {
     const DampenTag = struct {};
 
     const Jobs = struct {
+        fn resetAcc(entity: struct {
+            vel: *Velocity,
+        }) void {
+            entity.vel.* = Velocity{ .vel = vec3{ .x = 0, .y = 0, .z = 0 } };
+        }
         fn accVel(dt: f32, entity: struct {
-            acc: *Acceleration,
+            acc: *const Acceleration,
             vel: *Velocity,
         }) void {
             entity.vel.vel.x += entity.acc.acc.x * dt;
@@ -441,7 +510,8 @@ test "Masks" {
 
     var ecs = ECS.init();
     try ecs.startJobSystem(0);
-    _ = ecs.forEntitiesWithData(f32(0.16666), Jobs.accVel, util.emptySlice(ECS.JobID));
+    const accVelJob = ecs.forEntitiesWithData(f32(0.016666), Jobs.accVel);
+    _ = ecs.forEntitiesWithDep(Jobs.resetAcc, accVelJob);
     ecs.shutdown();
 
     const AC = ECS.ArchetypeChunk;
