@@ -4,6 +4,9 @@ const testing = std.testing;
 
 const vecs = @import("vec.zig");
 const Vec2 = vecs.Vec2;
+const Vec3 = vecs.Vec3;
+const Vec4 = vecs.Vec4;
+const BiVec3 = vecs.BiVec3;
 
 pub const Rotor2 = extern struct {
     dot: f32,
@@ -106,7 +109,122 @@ pub const Rotor2 = extern struct {
     }
 };
 
-const Rotor3 = extern struct {};
+const Rotor3 = extern struct {
+    pub dot: f32,
+    pub wedge: BiVec3,
+
+    pub const Identity = Rotor3{ .dot = 1.0, .wedge = BiVec3.Zero };
+
+    pub fn diffNormalized(a: Vec3, b: Vec3) Rotor3 {
+        return (Rotor3{
+            .dot = b.dot(a),
+            .wedge = b.wedge(a),
+        }).standardize();
+    }
+
+    pub fn diff(a: Vec3, b: Vec3) !Rotor3 {
+        return try (Rotor3{
+            .dot = b.dot(a),
+            .wedge = b.wedge(a),
+        }).standardize().normalize();
+    }
+
+    /// Translates the quaternion w + xi + yj + zk into a Rotor.
+    /// Assumes that the quaternion is normalized.  If it is not,
+    /// normalize() must be called afterwards.
+    pub fn fromQuaternion(w: f32, x: f32, y: f32, z: f32) Rotor3 {
+        return (Rotor3{
+            .dot = w,
+            .wedge = BiVec3{
+                .yz = y,
+                .zx = -z, // quaternions effectively use xz, and zx = -xz
+                .xy = x,
+            },
+        }).standardize();
+    }
+
+    /// Normalizes the rotor to unit length.
+    /// Rotors should stay normalized most of the time.
+    pub fn normalize(self: Rotor3) !Rotor3 {
+        const v4 = @bitCast(Vec4, self);
+        const norm = try v4.normalize();
+        return @bitCast(Rotor3, norm);
+    }
+
+    /// Standardizes the rotor to avoid double-cover.
+    /// A standardized rotor has the property that its first
+    /// non-zero component is positive.
+    pub fn standardize(self: Rotor3) Rotor3 {
+        if (self.dot > 0) return self;
+        return Rotor3{
+            .dot = -self.dot,
+            .wedge = BiVec3{
+                .yz = -self.wedge.yz,
+                .zx = -self.wedge.zx,
+                .xy = -self.wedge.xy,
+            },
+        };
+    }
+
+    /// Composes two rotors.  TODO: Which order are they
+    /// applied in?
+    pub fn mul(self: Rotor3, next: Rotor3) Rotor3 {
+        return Rotor3{
+            .dot = self.dot * next.dot + self.wedge.dot(next.wedge),
+            .wedge = self.wedge.scale(next.dot).add(next.wedge.scale(self.dot)).add(self.wedge.wedge(next.wedge)),
+        };
+    }
+
+    /// Interpolates evenly between two rotors along the shortest path.
+    /// If one parameter is standardized and the other is not, will interpolate
+    /// on the longest path instead.
+    pub fn slerp(self: Rotor3, target: Rotor3, alpha: f32) Rotor3 {
+        const va = @bitCast(Vec4, self);
+        const vb = @bitCast(Vec4, target);
+        const cosAngle = va.dot(vb);
+        if (math.fabs(cosAngle) > 0.999) return self.nlerp(target, alpha) catch unreachable;
+        const angle = math.acos(cosAngle);
+        const scale = 1.0 / math.sin(angle);
+        const fromMult = math.sin((1.0 - alpha) * angle) * scale;
+        const toMult = math.sin(alpha * angle) * scale;
+        const blended = va.scale(fromMult).add(vb.scale(toMult));
+        return @bitCast(Rotor3, blended);
+    }
+
+    /// Interpolates between two rotors, but is slightly faster in the
+    /// middle and slower on each end.  Useful for rotors that are close
+    /// to each other where this effect is not noticeable.
+    pub fn nlerp(self: Rotor3, target: Rotor3, alpha: f32) !Rotor3 {
+        const a = @bitCast(Vec4, self);
+        const b = @bitCast(Vec4, target);
+        const lerped = a.lerp(b, alpha);
+        const norm = try lerped.normalize();
+        return @bitCast(Rotor3, norm);
+    }
+
+    /// Rotates a vector
+    pub fn apply(self: Rotor3, in: Vec3) Vec3 {
+        // compute all distributive products
+        const dot2 = self.dot * self.dot;
+        const yz2 = self.wedge.yz * self.wedge.yz;
+        const zx2 = self.wedge.zx * self.wedge.zx;
+        const xy2 = self.wedge.xy * self.wedge.xy;
+        // multiply these by 2 since they are always used in pairs
+        const dotyz = self.dot * self.wedge.yz * 2;
+        const dotzx = self.dot * self.wedge.zx * 2;
+        const dotxy = self.dot * self.wedge.xy * 2;
+        const yzzx = self.wedge.yz * self.wedge.zx * 2;
+        const zxxy = self.wedge.zx * self.wedge.xy * 2;
+        const xyyz = self.wedge.xy * self.wedge.yz * 2;
+
+        // calculate the rotated components
+        const x = (dot2 + yz2 - zx2 - xy2) * in.x + (yzzx - dotxy) * in.y + (xyyz + dotzx) * in.z;
+        const y = (dot2 - yz2 + zx2 - xy2) * in.y + (zxxy - dotyz) * in.z + (yzzx + dotxy) * in.x;
+        const z = (dot2 - yz2 - zx2 + xy2) * in.z + (xyyz - dotzx) * in.x + (zxxy + dotyz) * in.y;
+
+        return Vec3.init(x, y, z);
+    }
+};
 
 test "compile Rotor2" {
     var x = Vec2.X;
@@ -122,4 +240,15 @@ test "compile Rotor2" {
     _ = a.addRight();
     _ = try a.normalize();
     _ = a.toAngleRad();
+}
+
+test "compile Rotor3" {
+    var a = Rotor3.Identity;
+    var b = Rotor3.fromQuaternion(0, 1, 0, 0);
+    var c = try b.normalize();
+    _ = b.standardize();
+    _ = b.mul(c);
+    _ = a.slerp(b, 0.25);
+    _ = try a.nlerp(c, 0.25);
+    _ = a.apply(Vec3.X);
 }

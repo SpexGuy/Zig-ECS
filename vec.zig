@@ -90,6 +90,15 @@ pub const Vec2 = extern struct {
         return self.x + self.y;
     }
 
+    /// Interpolates alpha percent between self and target.
+    /// If alpha is < 0 or > 1, will extrapolate.
+    pub inline fn lerp(self: Vec2, target: Vec2, alpha: f32) Vec2 {
+        return Vec2{
+            .x = self.x + (target.x - self.x) * alpha,
+            .y = self.y + (target.y - self.y) * alpha,
+        };
+    }
+
     /// Returns the square of the length of the vector.
     /// Slightly faster than calculating the length.
     pub inline fn lenSquared(self: Vec2) f32 {
@@ -169,21 +178,6 @@ pub const Vec2 = extern struct {
             .x = self.y,
             .y = -self.x,
         };
-    }
-
-    /// Rotates the vector counterclockwise around the origin
-    pub inline fn rotate(self: Vec2, angleRad: f32) Vec2 {
-        const sin = math.sin(angleRad);
-        const cos = math.cos(angleRad);
-        return Vec2{
-            .x = self.x * cos - self.y * sin,
-            .y = self.x * sin + self.y * cos,
-        };
-    }
-
-    /// Rotates the vector counterclockwise around the pivot point
-    pub fn rotateAround(self: Vec2, pivot: Vec2, angleRad: f32) Vec2 {
-        return self.sub(pivot).rotate(angleRad).add(pivot);
     }
 
     /// Returns a pointer to the vector's data as a fixed-size buffer.
@@ -321,6 +315,16 @@ pub const Vec3 = extern struct {
         return self.x + self.y + self.z;
     }
 
+    /// Interpolates alpha percent between self and target.
+    /// If alpha is < 0 or > 1, will extrapolate.
+    pub inline fn lerp(self: Vec3, target: Vec3, alpha: f32) Vec3 {
+        return Vec3{
+            .x = self.x + (target.x - self.x) * alpha,
+            .y = self.y + (target.y - self.y) * alpha,
+            .z = self.z + (target.z - self.z) * alpha,
+        };
+    }
+
     /// Returns the square of the length of the vector.
     /// Slightly faster than calculating the length.
     pub inline fn lenSquared(self: Vec3) f32 {
@@ -337,19 +341,22 @@ pub const Vec3 = extern struct {
         return self.x * other.x + self.y * other.y + self.z * other.z;
     }
 
-    /// Computes the wedge product of two vectors.
-    /// In 3D this is equivalent to the cross product.
-    pub inline fn wedge(self: Vec3, other: Vec3) Vec3 {
-        return Vec3{
-            .x = self.y * other.z - self.z * other.y,
-            .y = self.z * other.x - self.x * other.z,
-            .z = self.x * other.y - self.y * other.x,
+    /// Computes the wedge product of two vectors
+    pub inline fn wedge(self: Vec3, other: Vec3) BiVec3 {
+        return BiVec3{
+            .xy = self.x * other.y - self.y * other.x,
+            .yz = self.y * other.z - self.z * other.y,
+            .zx = self.z * other.x - self.x * other.z,
         };
     }
 
     /// Computes the cross product of two vectors
     pub inline fn cross(self: Vec3, other: Vec3) Vec3 {
-        return self.wedge(other);
+        return Vec3{
+            .x = self.y * other.z - self.z * other.y,
+            .y = self.z * other.x - self.x * other.z,
+            .z = self.x * other.y - self.y * other.x,
+        };
     }
 
     /// Computes the projection of self along other.
@@ -532,6 +539,17 @@ pub const Vec4 = extern struct {
         return self.x + self.y + self.z;
     }
 
+    /// Interpolates alpha percent between self and target.
+    /// If alpha is < 0 or > 1, will extrapolate.
+    pub inline fn lerp(self: Vec4, target: Vec4, alpha: f32) Vec4 {
+        return Vec4{
+            .x = self.x + (target.x - self.x) * alpha,
+            .y = self.y + (target.y - self.y) * alpha,
+            .z = self.z + (target.z - self.z) * alpha,
+            .w = self.w + (target.w - self.w) * alpha,
+        };
+    }
+
     /// Returns the square of the length of the vector.
     /// Slightly faster than calculating the length.
     pub inline fn lenSquared(self: Vec4) f32 {
@@ -550,7 +568,7 @@ pub const Vec4 = extern struct {
 
     /// Computes the projection of self along other.
     /// If other is too close to zero, returns error.Singular.
-    pub inline fn along(self: Vec4, other: Vec4) Vec4 {
+    pub inline fn along(self: Vec4, other: Vec4) !Vec4 {
         const mult = self.dot(other) / other.lenSquared();
         if (!math.isFinite(mult)) return error.Singular;
         return other.scale(mult);
@@ -601,6 +619,81 @@ pub const Vec4 = extern struct {
     }
 };
 
+pub const BiVec3 = extern struct {
+    pub yz: f32,
+    pub zx: f32,
+    pub xy: f32,
+
+    /// (0,0,0)
+    pub const Zero = init(0, 0, 0);
+
+    /// (1,0,0)
+    pub const YZ = init(1, 0, 0);
+
+    /// (0,1,0)
+    pub const ZX = init(0, 1, 0);
+
+    /// (0,0,1)
+    pub const XY = init(0, 0, 1);
+
+    /// Creates a BiVec3 with the given components
+    pub inline fn init(yz: f32, zx: f32, xy: f32) BiVec3 {
+        return BiVec3{
+            .yz = yz,
+            .zx = zx,
+            .xy = xy,
+        };
+    }
+
+    /// Add two bivectors
+    pub inline fn add(self: BiVec3, other: BiVec3) BiVec3 {
+        return BiVec3{
+            .yz = self.yz + other.yz,
+            .zx = self.zx + other.zx,
+            .xy = self.xy + other.xy,
+        };
+    }
+
+    /// Dots with another bivector and returns a scalar.
+    /// Note that this is NOT the same as a vector dot product.
+    pub inline fn dot(self: BiVec3, other: BiVec3) f32 {
+        return -(self.yz * other.yz) - (self.zx * other.zx) - (self.xy * other.xy);
+    }
+
+    /// Wedges with another bivector and returns a bivector.
+    /// Note that this is NOT the same as a vector wedge/cross product.
+    pub inline fn wedge(self: BiVec3, other: BiVec3) BiVec3 {
+        return BiVec3{
+            .yz = self.xy * other.zx - self.zx * other.xy,
+            .zx = self.yz * other.xy - self.xy * other.yz,
+            .xy = self.zx * other.yz - self.yz * other.zx,
+        };
+    }
+
+    /// Wedges with a vector and returns a trivector.
+    /// This value is equivalent to the scalar triple product.
+    /// Note that this is NOT the same as a vector wedge/cross product.
+    pub inline fn wedgeVec(self: BiVec3, other: Vec3) f32 {
+        return self.yz * other.x + self.zx * other.y + self.xy * other.z;
+    }
+
+    /// Dots with a vector and returns a vector.
+    /// This value is equivalent to the vector triple product.
+    /// Note that this is NOT the same as a vector dot product.
+    pub inline fn dotVec(self: BiVec3, other: Vec3) Vec3 {
+        return @bitCast(Vec3, self).cross(other);
+    }
+
+    /// Multiply each component by a constant
+    pub inline fn scale(self: BiVec3, multiple: f32) BiVec3 {
+        return BiVec3{
+            .yz = self.yz * multiple,
+            .zx = self.zx * multiple,
+            .xy = self.xy * multiple,
+        };
+    }
+};
+
 test "compile Vec2" {
     var a = Vec2.init(0.5, 0);
     var b = Vec2.splat(2);
@@ -612,6 +705,7 @@ test "compile Vec2" {
     _ = a.mul(b);
     _ = try c.normalize();
     _ = a.sum();
+    _ = a.lerp(b, 0.25);
     _ = b.lenSquared();
     _ = c.len();
     _ = c.dot(c);
@@ -622,8 +716,6 @@ test "compile Vec2" {
     _ = try a.changeBasis(b, c);
     _ = b.left();
     _ = a.right();
-    _ = a.rotate(32);
-    _ = b.rotateAround(a, 32);
     _ = b.asBuf();
     _ = b.asConstBuf();
     const slice = b.asSlice();
@@ -650,11 +742,12 @@ test "compile Vec3" {
     _ = a.mul(b);
     _ = try c.normalize();
     _ = a.sum();
+    _ = a.lerp(b, 0.75);
     _ = b.lenSquared();
     _ = c.len();
     _ = c.dot(c);
-    _ = c.cross(a);
     _ = c.wedge(a);
+    _ = c.cross(a);
     _ = try c.along(a);
     _ = c.across(a) catch Vec3.Zero;
     _ = b.asBuf();
@@ -689,9 +782,11 @@ test "compile Vec4" {
     _ = try c.perspective();
     _ = try c.perspective4();
     _ = a.sum();
+    _ = a.lerp(b, 0.5);
     _ = b.lenSquared();
     _ = c.len();
     _ = c.dot(c);
+    _ = try c.along(b);
     _ = b.asBuf();
     _ = b.asConstBuf();
     const slice = b.asSlice();
@@ -712,4 +807,15 @@ test "compile Vec4" {
     testing.expectEqual(f32(7), b.x);
     testing.expectEqual(f32(7), as3.x);
     testing.expectEqual(val2.x, 2);
+}
+
+test "compile BiVec3" {
+    var a = BiVec3.init(0.5, 1, 0);
+    var b = BiVec3.Zero;
+    _ = a.dot(b);
+    const c = a.wedge(b);
+    _ = c.wedgeVec(Vec3.X);
+    _ = c.dotVec(Vec3.X);
+    _ = c.scale(4);
+    _ = a.add(c);
 }
