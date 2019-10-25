@@ -2,6 +2,7 @@ const std = @import("std");
 const math = std.math;
 const testing = std.testing;
 
+/// A 2-dimensional vector, representing the quantity x*e1 + y*e2.
 pub const Vec2 = extern struct {
     pub x: f32,
     pub y: f32,
@@ -216,6 +217,7 @@ pub const Vec2 = extern struct {
     }
 };
 
+/// A 3-dimensional vector, representing the quantity x*e1 + y*e2 + z*e3.
 pub const Vec3 = extern struct {
     pub x: f32,
     pub y: f32,
@@ -411,8 +413,22 @@ pub const Vec3 = extern struct {
     pub inline fn toVec4(self: Vec3, w: f32) Vec4 {
         return Vec4.init(self.x, self.y, self.z, w);
     }
+
+    /// Provides a view over this vector as a BiVec3
+    pub inline fn asBiVec3(self: *Vec3) *BiVec3 {
+        return @ptrCast(*BiVec3, self);
+    }
+
+    /// Returns the BiVec3 representation of this vector.
+    /// This is the bivector normal to this vector with area
+    /// equal to the length of this vector.  This is equal
+    /// to this vector times the unit trivector.
+    pub inline fn toBiVec3(self: Vec3) BiVec3 {
+        return @bitCast(BiVec3, self);
+    }
 };
 
+/// A 4-dimensional vector, representing the quantity x*e1 + y*e2 + z*e3 + w*e4.
 pub const Vec4 = extern struct {
     pub x: f32,
     pub y: f32,
@@ -619,7 +635,11 @@ pub const Vec4 = extern struct {
     }
 };
 
+/// A 3-dimensional bivector, representing the quantity xy*e1^e2 + yz*e2^e3 + zx*e3^e1.
 pub const BiVec3 = extern struct {
+    // Field order is set up here to match that of Vec3,
+    // so BitCasting a Vec3 to a BiVec3 is equivalent to
+    // Vec3.dual(..)
     pub yz: f32,
     pub zx: f32,
     pub xy: f32,
@@ -651,6 +671,16 @@ pub const BiVec3 = extern struct {
             .yz = self.yz + other.yz,
             .zx = self.zx + other.zx,
             .xy = self.xy + other.xy,
+        };
+    }
+
+    /// Reverse the orientation of the bivector without
+    /// changing its magnitude.
+    pub inline fn negate(self: BiVec3) BiVec3 {
+        return BiVec3{
+            .yz = -self.yz,
+            .zx = -self.zx,
+            .xy = -self.xy,
         };
     }
 
@@ -691,6 +721,38 @@ pub const BiVec3 = extern struct {
             .zx = self.zx * multiple,
             .xy = self.xy * multiple,
         };
+    }
+
+    /// Returns a pointer to the vector's data as a fixed-size buffer.
+    pub inline fn asBuf(self: *Vec4) *[3]f32 {
+        return @ptrCast(*[3]f32, self);
+    }
+
+    /// Returns a pointer to the vector's data as a const fixed-size buffer.
+    pub inline fn asConstBuf(self: *const Vec4) *const [3]f32 {
+        return @ptrCast(*const [3]f32, self);
+    }
+
+    /// Returns a slice of the vector's data.
+    pub inline fn asSlice(self: *Vec4) []f32 {
+        return self.asBuf()[0..];
+    }
+
+    /// Returns a const slice of the vector's data.
+    pub inline fn asConstSlice(self: *const Vec4) []const f32 {
+        return self.asConstBuf()[0..];
+    }
+
+    /// Provide a Vec3 view over this BiVector.
+    /// x maps to yz, y maps to zx, z maps to xy.
+    pub inline fn asVec3(self: *BiVec3) *Vec3 {
+        return @ptrCast(*Vec3, self);
+    }
+
+    /// Copies into a Vec3.
+    /// x maps to yz, y maps to zx, z maps to xy.
+    pub inline fn toVec3(self: BiVec3) Vec3 {
+        return @bitCast(Vec3, self);
     }
 };
 

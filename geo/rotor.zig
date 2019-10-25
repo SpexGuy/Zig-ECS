@@ -129,6 +129,58 @@ const Rotor3 = extern struct {
         }).standardize().normalize();
     }
 
+    pub fn axisAngle(axis: BiVec3, angle: f32) !Rotor3 {
+        return axisAngleNormalized(try axis.normalize(), angle);
+    }
+
+    pub fn axisAngleNormalized(axis: BiVec3, angle: f32) Rotor3 {
+        const cos = math.cos(angle * 0.5);
+        const sin = math.sin(angle * 0.5);
+        return (Rotor3{
+            .dot = cos,
+            .wedge = axis.scale(sin),
+        }).standardize();
+    }
+
+    pub fn aroundX(angle: f32) Rotor3 {
+        const cos = math.cos(angle * 0.5);
+        const sin = math.sin(angle * 0.5);
+        return (Rotor3{
+            .dot = cos,
+            .wedge = BiVec3{
+                .yz = sin,
+                .zx = 0,
+                .xy = 0,
+            },
+        }).standardize();
+    }
+
+    pub fn aroundY(angle: f32) Rotor3 {
+        const cos = math.cos(angle * 0.5);
+        const sin = math.sin(angle * 0.5);
+        return (Rotor3{
+            .dot = cos,
+            .wedge = BiVec3{
+                .yz = 0,
+                .zx = sin,
+                .xy = 0,
+            },
+        }).standardize();
+    }
+
+    pub fn aroundZ(angle: f32) Rotor3 {
+        const cos = math.cos(angle * 0.5);
+        const sin = math.sin(angle * 0.5);
+        return (Rotor3{
+            .dot = cos,
+            .wedge = BiVec3{
+                .yz = 0,
+                .zx = 0,
+                .xy = sin,
+            },
+        }).standardize();
+    }
+
     /// Translates the quaternion w + xi + yj + zk into a Rotor.
     /// Assumes that the quaternion is normalized.  If it is not,
     /// normalize() must be called afterwards.
@@ -223,6 +275,16 @@ const Rotor3 = extern struct {
         const z = (dot2 - yz2 - zx2 + xy2) * in.z + (xyyz - dotzx) * in.x + (zxxy + dotyz) * in.y;
 
         return Vec3.init(x, y, z);
+    }
+
+    pub inline fn calcRotationAxis(self: Rotor3) !BiVec3 {
+        const mult = 1.0 / math.sqrt(math.max(0.0, 1.0 - self.dot * self.dot));
+        if (!math.isFinite(mult)) return error.Singular;
+        return self.wedge.scale(mult);
+    }
+
+    pub inline fn calcRotationAngle(self: Rotor3) f32 {
+        return math.acos(self.dot);
     }
 };
 
