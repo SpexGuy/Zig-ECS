@@ -377,6 +377,16 @@ pub const Vec3 = extern struct {
         return error.Singular;
     }
 
+    /// Returns a vector that is orthogonal to this vector
+    pub inline fn orthogonal(v: Vec3) Vec3 {
+        const x = math.abs(v.x);
+        const y = math.abs(v.y);
+        const z = math.abs(v.z);
+
+        const other = if (x < y) if (x < z) X else Z else if (y < z) Y else Z;
+        return v.cross(other);
+    }
+
     /// Returns a pointer to the vector's data as a fixed-size buffer.
     pub inline fn asBuf(self: *Vec3) *[3]f32 {
         return @ptrCast(*[3]f32, self);

@@ -113,29 +113,108 @@ pub const Rotor2 = extern struct {
 };
 
 pub const Rotor3 = extern struct {
+    /// The dot product of the two rotor vectors.
     pub dot: f32,
+
+    /// The wedge product of the two rotor vectors.
+    /// This is the plane in which the rotor rotates.
     pub wedge: BiVec3,
 
+    /// The rotor that performs no rotation
     pub const Identity = Rotor3{ .dot = 1.0, .wedge = BiVec3.Zero };
 
-    pub fn diffNormalized(a: Vec3, b: Vec3) Rotor3 {
+    /// Creates a rotor that reflects across two unit vectors.
+    /// The parameters must both be unit vectors, or a.len() * b.len() must equal 1.
+    /// The rotor will rotate in the plane of ab from a towards b,
+    /// for double the angle between ab.
+    pub fn initVecsNormalized(a: Vec3, b: Vec3) Rotor3 {
         return (Rotor3{
             .dot = b.dot(a),
             .wedge = b.wedge(a),
         }).standardize();
     }
 
-    pub fn diff(a: Vec3, b: Vec3) !Rotor3 {
+    /// Creates a rotor that reflects across two vectors.
+    /// The rotor will rotate in the plane of ab from a towards b,
+    /// for double the angle between ab.
+    /// If a or b is zero, returns error.Singular.
+    pub fn initVecs(a: Vec3, b: Vec3) !Rotor3 {
         return try (Rotor3{
             .dot = b.dot(a),
             .wedge = b.wedge(a),
         }).standardize().normalize();
     }
 
+    /// Creates a rotor that rotates a to b along the plane between a and b
+    /// If a and b are 180 degrees apart, picks an arbitrary axis to rotate around.
+    /// If a or b is zero, returns error.Singular.
+    pub fn diffVec(a: Vec3, b: Vec3) !Rotor3 {
+        const normAB = math.sqrt(a.lenSquared() * b.lenSquared());
+        return (Rotor3{
+            .dot = b.dot(a) + normAB,
+            .wedge = b.wedge(a),
+        }).normalize() catch Rotor3{
+            .dot = 0,
+            .wedge = try a.orthogonal().toBiVec3().normalize(),
+        };
+    }
+
+    /// Creates a rotor that rotates a to b along the plane between a and b
+    /// If a and b are 180 degrees apart, picks an arbitrary axis to rotate around.
+    /// If any input vector is zero, returns error.Singular.
+    pub fn diffVecPreferredOrtho(a: Vec3, b: Vec3, ortho: BiVec3) !Rotor3 {
+        const normAB = math.sqrt(a.lenSquared() * b.lenSquared());
+        return (Rotor3{
+            .dot = b.dot(a) + normAB,
+            .wedge = b.wedge(a),
+        }).normalize() catch Rotor3{
+            .dot = 0,
+            .wedge = try ortho.normalize(),
+        };
+    }
+
+    /// Creates a rotor that performs half of the rotation of this one.
+    pub fn halfway(self: Rotor3) Rotor3 {
+        return (Rotor3{
+            .dot = self.dot + 1.0,
+            .wedge = self.wedge,
+        }).normalize() catch unreachable;
+    }
+
+    /// Creates a rotor that rotates from to to, and changes the up direction from fromUp to toUp.
+    /// Returns error.Singular if:
+    ///  - any input vector is zero
+    ///  - from cross fromUp is zero
+    ///  - to cross toUp is zero
+    pub fn diffFrame(from: Vec3, fromUp: Vec3, to: Vec3, toUp: Vec3) !Rotor3 {
+        // get vectors perpendicular to from and to
+        const fromOut = from.cross(fromUp);
+        const toOut = to.cross(toUp);
+        // calculate the rotor that turns from to to
+        const baseRotor = diffVec(from, to);
+        // apply that rotation to the fromOut.
+        // rotatedFromOut is perpendicular to to.
+        const rotatedFromOut = baseRotor.apply(fromOut);
+        // make a second rotor that rotates around to
+        // this fixes up the up vector
+        const fixUpRotor = diffVecPreferredOrtho(rotatedFromOut, toOut, to.toBiVec3());
+        // combine the two into a single rotor
+        return fixUpRotor.preMul(baseRotor);
+    }
+
+    /// Calculates the rotor that transforms a to b.
+    /// diff(a, b)(a(x)) == b(x).
+    pub fn diff(a: Rotor3, b: Rotor3) Rotor3 {
+        return b.preMul(a.reverse());
+    }
+
+    /// Creates a rotor on a given wedge for a given angle.
     pub fn axisAngle(axis: BiVec3, angle: f32) !Rotor3 {
         return axisAngleNormalized(try axis.normalize(), angle);
     }
 
+    /// Creates a rotor on a given wedge for a given angle.
+    /// The wedge must be normalized.
     pub fn axisAngleNormalized(axis: BiVec3, angle: f32) Rotor3 {
         const cos = math.cos(angle * 0.5);
         const sin = math.sin(angle * 0.5);
@@ -145,6 +224,8 @@ pub const Rotor3 = extern struct {
         }).standardize();
     }
 
+    /// Creates a rotor around the x axis.
+    /// angle is in radians.
     pub fn aroundX(angle: f32) Rotor3 {
         const cos = math.cos(angle * 0.5);
         const sin = math.sin(angle * 0.5);
@@ -158,6 +239,8 @@ pub const Rotor3 = extern struct {
         }).standardize();
     }
 
+    /// Creates a rotor around the y axis.
+    /// angle is in radians.
     pub fn aroundY(angle: f32) Rotor3 {
         const cos = math.cos(angle * 0.5);
         const sin = math.sin(angle * 0.5);
@@ -171,6 +254,8 @@ pub const Rotor3 = extern struct {
         }).standardize();
     }
 
+    /// Creates a rotor around the z axis.
+    /// angle is in radians.
     pub fn aroundZ(angle: f32) Rotor3 {
         const cos = math.cos(angle * 0.5);
         const sin = math.sin(angle * 0.5);
@@ -221,12 +306,12 @@ pub const Rotor3 = extern struct {
         };
     }
 
-    /// Composes two rotors.  TODO: Which order are they
-    /// applied in?
-    pub fn mul(self: Rotor3, next: Rotor3) Rotor3 {
+    /// Composes two rotors into one that applies b first then a.
+    pub fn preMul(a: Rotor3, b: Rotor3) Rotor3 {
+        // TODO make sure this is the correct direction.
         return Rotor3{
-            .dot = self.dot * next.dot + self.wedge.dot(next.wedge),
-            .wedge = self.wedge.scale(next.dot).add(next.wedge.scale(self.dot)).add(self.wedge.wedge(next.wedge)),
+            .dot = a.dot * b.dot + a.wedge.dot(b.wedge),
+            .wedge = a.wedge.scale(b.dot).add(b.wedge.scale(a.dot)).add(a.wedge.wedge(b.wedge)),
         };
     }
 
@@ -280,6 +365,7 @@ pub const Rotor3 = extern struct {
         return Vec3.init(x, y, z);
     }
 
+    /// Creates a Mat3 that performs the same transform as this rotor
     pub fn toMat3(self: Rotor3) Mat3 {
         // compute all distributive products
         const dot2 = self.dot * self.dot;
@@ -313,12 +399,14 @@ pub const Rotor3 = extern struct {
         };
     }
 
+    /// Calculates the axis of rotation as a unit vector
     pub inline fn calcRotationAxis(self: Rotor3) !BiVec3 {
         const mult = 1.0 / math.sqrt(math.max(0.0, 1.0 - self.dot * self.dot));
         if (!math.isFinite(mult)) return error.Singular;
         return self.wedge.scale(mult);
     }
 
+    /// Calculates the angle of rotation
     pub inline fn calcRotationAngle(self: Rotor3) f32 {
         return math.acos(self.dot);
     }
@@ -345,7 +433,7 @@ test "compile Rotor3" {
     var b = Rotor3.fromQuaternion(0, 1, 0, 0);
     var c = try b.normalize();
     _ = b.standardize();
-    _ = b.mul(c);
+    _ = b.preMul(c);
     _ = a.slerp(b, 0.25);
     _ = try a.nlerp(c, 0.25);
     _ = a.apply(Vec3.X);
