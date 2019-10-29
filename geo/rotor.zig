@@ -8,6 +8,9 @@ const Vec3 = vecs.Vec3;
 const Vec4 = vecs.Vec4;
 const BiVec3 = vecs.BiVec3;
 
+const mats = @import("mat.zig");
+const Mat3 = mats.Mat3;
+
 pub const Rotor2 = extern struct {
     dot: f32,
     wedge: f32,
@@ -109,7 +112,7 @@ pub const Rotor2 = extern struct {
     }
 };
 
-const Rotor3 = extern struct {
+pub const Rotor3 = extern struct {
     pub dot: f32,
     pub wedge: BiVec3,
 
@@ -275,6 +278,39 @@ const Rotor3 = extern struct {
         const z = (dot2 - yz2 - zx2 + xy2) * in.z + (xyyz - dotzx) * in.x + (zxxy + dotyz) * in.y;
 
         return Vec3.init(x, y, z);
+    }
+
+    pub fn toMat3(self: Rotor3) Mat3 {
+        // compute all distributive products
+        const dot2 = self.dot * self.dot;
+        const yz2 = self.wedge.yz * self.wedge.yz;
+        const zx2 = self.wedge.zx * self.wedge.zx;
+        const xy2 = self.wedge.xy * self.wedge.xy;
+        // multiply these by 2 since they are always used in pairs
+        const dotyz = self.dot * self.wedge.yz * 2;
+        const dotzx = self.dot * self.wedge.zx * 2;
+        const dotxy = self.dot * self.wedge.xy * 2;
+        const yzzx = self.wedge.yz * self.wedge.zx * 2;
+        const zxxy = self.wedge.zx * self.wedge.xy * 2;
+        const xyyz = self.wedge.xy * self.wedge.yz * 2;
+
+        return Mat3{
+            .x = Vec3{
+                .x = dot2 + yz2 - zx2 - xy2,
+                .y = yzzx + dotxy,
+                .z = xyyz - dotzx,
+            },
+            .y = Vec3{
+                .x = yzzx - dotxy,
+                .y = dot2 - yz2 + zx2 - xy2,
+                .z = zxxy + dotyz,
+            },
+            .z = Vec3{
+                .x = xyyz + dotzx,
+                .y = zxxy - dotyz,
+                .z = dot2 - yz2 - zx2 + xy2,
+            },
+        };
     }
 
     pub inline fn calcRotationAxis(self: Rotor3) !BiVec3 {
