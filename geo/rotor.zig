@@ -123,14 +123,25 @@ pub const Rotor3 = extern struct {
     /// The rotor that performs no rotation
     pub const Identity = Rotor3{ .dot = 1.0, .wedge = BiVec3.Zero };
 
+    pub fn init(dot: f32, yz: f32, zx: f32, xy: f32) Rotor3 {
+        return Rotor3{
+            .dot = dot,
+            .wedge = BiVec3{
+                .yz = yz,
+                .zx = zx,
+                .xy = xy,
+            },
+        };
+    }
+
     /// Creates a rotor that reflects across two unit vectors.
     /// The parameters must both be unit vectors, or a.len() * b.len() must equal 1.
     /// The rotor will rotate in the plane of ab from a towards b,
     /// for double the angle between ab.
     pub fn initVecsNormalized(a: Vec3, b: Vec3) Rotor3 {
         return (Rotor3{
-            .dot = b.dot(a),
-            .wedge = b.wedge(a),
+            .dot = a.dot(b),
+            .wedge = a.wedge(b),
         }).standardize();
     }
 
@@ -140,8 +151,8 @@ pub const Rotor3 = extern struct {
     /// If a or b is zero, returns error.Singular.
     pub fn initVecs(a: Vec3, b: Vec3) !Rotor3 {
         return try (Rotor3{
-            .dot = b.dot(a),
-            .wedge = b.wedge(a),
+            .dot = a.dot(b),
+            .wedge = a.wedge(b),
         }).standardize().normalize();
     }
 
@@ -151,8 +162,8 @@ pub const Rotor3 = extern struct {
     pub fn diffVec(a: Vec3, b: Vec3) !Rotor3 {
         const normAB = math.sqrt(a.lenSquared() * b.lenSquared());
         return (Rotor3{
-            .dot = b.dot(a) + normAB,
-            .wedge = b.wedge(a),
+            .dot = a.dot(b) + normAB,
+            .wedge = a.wedge(b),
         }).normalize() catch Rotor3{
             .dot = 0,
             .wedge = try a.orthogonal().toBiVec3().normalize(),
@@ -165,8 +176,8 @@ pub const Rotor3 = extern struct {
     pub fn diffVecPreferredOrtho(a: Vec3, b: Vec3, ortho: BiVec3) !Rotor3 {
         const normAB = math.sqrt(a.lenSquared() * b.lenSquared());
         return (Rotor3{
-            .dot = b.dot(a) + normAB,
-            .wedge = b.wedge(a),
+            .dot = a.dot(b) + normAB,
+            .wedge = a.wedge(b),
         }).normalize() catch Rotor3{
             .dot = 0,
             .wedge = try ortho.normalize(),
@@ -295,7 +306,7 @@ pub const Rotor3 = extern struct {
     /// A standardized rotor has the property that its first
     /// non-zero component is positive.
     pub fn standardize(self: Rotor3) Rotor3 {
-        if (self.dot > 0) return self;
+        if (self.dot >= -0.0) return self;
         return Rotor3{
             .dot = -self.dot,
             .wedge = BiVec3{
@@ -410,6 +421,26 @@ pub const Rotor3 = extern struct {
     pub inline fn calcRotationAngle(self: Rotor3) f32 {
         return math.acos(self.dot);
     }
+
+    pub fn expectNear(expected: Rotor3, actual: Rotor3, epsilon: f32) void {
+        if (!math.approxEq(f32, expected.dot, actual.dot, epsilon) or
+            !math.approxEq(f32, expected.wedge.yz, actual.wedge.yz, epsilon) or
+            !math.approxEq(f32, expected.wedge.zx, actual.wedge.zx, epsilon) or
+            !math.approxEq(f32, expected.wedge.xy, actual.wedge.xy, epsilon))
+        {
+            std.debug.panic(
+                "Expected Rotor3({}, ({}, {}, {})), found Rotor3({}, ({}, {}, {}))",
+                expected.dot,
+                expected.wedge.yz,
+                expected.wedge.zx,
+                expected.wedge.xy,
+                actual.dot,
+                actual.wedge.yz,
+                actual.wedge.zx,
+                actual.wedge.xy,
+            );
+        }
+    }
 };
 
 test "compile Rotor2" {
@@ -437,4 +468,31 @@ test "compile Rotor3" {
     _ = a.slerp(b, 0.25);
     _ = try a.nlerp(c, 0.25);
     _ = a.apply(Vec3.X);
+}
+
+test "Rotor3.initVecs" {
+    const epsilon = 1e-5;
+    const Identity = Rotor3.Identity;
+    const expectNear = Rotor3.expectNear;
+    expectNear(Identity, try Rotor3.initVecs(Vec3.X, Vec3.X), epsilon);
+    expectNear(Identity, try Rotor3.initVecs(Vec3.Y, Vec3.Y), epsilon);
+    expectNear(Identity, try Rotor3.initVecs(Vec3.Z, Vec3.Z), epsilon);
+    expectNear(Rotor3.init(0, 0, 0, 1), try Rotor3.initVecs(Vec3.X, Vec3.Y), epsilon);
+    expectNear(Rotor3.init(0, 0, -1, 0), try Rotor3.initVecs(Vec3.X, Vec3.Z), epsilon);
+    expectNear(Rotor3.init(0, 0, 1, 0), try Rotor3.initVecs(Vec3.Z, Vec3.X), epsilon);
+    expectNear(Rotor3.init(0, 1, 0, 0), try Rotor3.initVecs(Vec3.Y, Vec3.Z), epsilon);
+
+    const isqrt2 = 1.0 / math.sqrt(2.0);
+    expectNear(Rotor3.init(isqrt2, 0, 0, isqrt2), try Rotor3.initVecs(Vec3.X, Vec3.init(isqrt2, isqrt2, 0)), epsilon);
+    expectNear(Rotor3.init(isqrt2, 0, 0, isqrt2), try Rotor3.initVecs(Vec3.X.scale(5), Vec3.init(10, 10, 0)), epsilon);
+    expectNear(Rotor3.init(isqrt2, 0, 0, isqrt2), Rotor3.initVecsNormalized(Vec3.X, Vec3.init(isqrt2, isqrt2, 0)), epsilon);
+}
+
+test "Rotor3.diffVec" {
+    const epsilon = 1e-5;
+    const Identity = Rotor3.Identity;
+    const expectNear = Rotor3.expectNear;
+    expectNear(Identity, try Rotor3.diffVec(Vec3.X, Vec3.X), epsilon);
+    expectNear(Identity, try Rotor3.diffVec(Vec3.Y, Vec3.Y), epsilon);
+    expectNear(Identity, try Rotor3.diffVec(Vec3.Z, Vec3.Z), epsilon);
 }

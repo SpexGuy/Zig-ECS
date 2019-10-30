@@ -379,9 +379,9 @@ pub const Vec3 = extern struct {
 
     /// Returns a vector that is orthogonal to this vector
     pub inline fn orthogonal(v: Vec3) Vec3 {
-        const x = math.abs(v.x);
-        const y = math.abs(v.y);
-        const z = math.abs(v.z);
+        const x = math.fabs(v.x);
+        const y = math.fabs(v.y);
+        const z = math.fabs(v.z);
 
         const other = if (x < y) if (x < z) X else Z else if (y < z) Y else Z;
         return v.cross(other);
@@ -731,6 +731,12 @@ pub const BiVec3 = extern struct {
             .zx = self.zx * multiple,
             .xy = self.xy * multiple,
         };
+    }
+
+    /// Normalize this vec. Returns error.Singular if
+    /// this is the zero bivector.
+    pub inline fn normalize(self: BiVec3) !BiVec3 {
+        return (try self.toVec3().normalize()).toBiVec3();
     }
 
     /// Returns a pointer to the vector's data as a fixed-size buffer.
