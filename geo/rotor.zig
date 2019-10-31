@@ -170,17 +170,28 @@ pub const Rotor3 = extern struct {
         };
     }
 
-    /// Creates a rotor that rotates a to b along the plane between a and b
-    /// If a and b are 180 degrees apart, picks an arbitrary axis to rotate around.
-    /// If any input vector is zero, returns error.Singular.
-    pub fn diffVecPreferredOrtho(a: Vec3, b: Vec3, ortho: BiVec3) !Rotor3 {
-        const normAB = math.sqrt(a.lenSquared() * b.lenSquared());
+    /// Creates a rotor that rotates along the ortho plane from a's projection to b's projection.
+    /// The returned rotor is guaranteed to rotate in the direction of ortho, and as a result
+    /// it may not be standardized.  Call standardize() on the result if you want the shorter rotation.
+    pub fn diffVecAlong(a: Vec3, b: Vec3, ortho: BiVec3) !Rotor3 {
+        // get projection of a and b onto ortho.  They will be rotated 90 degrees since we
+        // are using dotVec but it doesn't matter since we only care about the angle between them.
+        const aPerp = ortho.dotVec(a);
+        const bPerp = ortho.dotVec(b);
+
+        const normAB2 = aPerp.lenSquared() * bPerp.lenSquared();
+        const normAB = math.sqrt(normAB2);
+        const dot = aPerp.dot(bPerp);
+        const crossMag = math.sqrt(normAB2 - dot * dot);
+        const normOrtho = try ortho.normalize();
+
         return (Rotor3{
-            .dot = a.dot(b) + normAB,
-            .wedge = a.wedge(b),
-        }).normalize() catch Rotor3{
+            .dot = dot + normAB,
+            .wedge = normOrtho.scale(crossMag),
+        }).normalize() catch
+            if (normAB == 0) error.Singular else Rotor3{
             .dot = 0,
-            .wedge = try ortho.normalize(),
+            .wedge = normOrtho,
         };
     }
 
@@ -189,7 +200,7 @@ pub const Rotor3 = extern struct {
         return (Rotor3{
             .dot = self.dot + 1.0,
             .wedge = self.wedge,
-        }).normalize() catch unreachable;
+        }).normalize() catch Rotor3.Identity;
     }
 
     /// Creates a rotor that rotates from to to, and changes the up direction from fromUp to toUp.
@@ -198,17 +209,14 @@ pub const Rotor3 = extern struct {
     ///  - from cross fromUp is zero
     ///  - to cross toUp is zero
     pub fn diffFrame(from: Vec3, fromUp: Vec3, to: Vec3, toUp: Vec3) !Rotor3 {
-        // get vectors perpendicular to from and to
-        const fromOut = from.cross(fromUp);
-        const toOut = to.cross(toUp);
         // calculate the rotor that turns from to to
-        const baseRotor = diffVec(from, to);
+        const baseRotor = try diffVec(from, to);
         // apply that rotation to the fromOut.
         // rotatedFromOut is perpendicular to to.
-        const rotatedFromOut = baseRotor.apply(fromOut);
+        const rotatedFromUp = baseRotor.apply(fromUp);
         // make a second rotor that rotates around to
         // this fixes up the up vector
-        const fixUpRotor = diffVecPreferredOrtho(rotatedFromOut, toOut, to.toBiVec3());
+        const fixUpRotor = (try diffVecAlong(rotatedFromUp, toUp, to.toBiVec3())).standardize();
         // combine the two into a single rotor
         return fixUpRotor.preMul(baseRotor);
     }
@@ -281,15 +289,14 @@ pub const Rotor3 = extern struct {
     }
 
     /// Translates the quaternion w + xi + yj + zk into a Rotor.
-    /// Assumes that the quaternion is normalized.  If it is not,
-    /// normalize() must be called afterwards.
+    /// Assumes the identities i*j = k, j*k = i, k*i = j, ijk = -1
     pub fn fromQuaternion(w: f32, x: f32, y: f32, z: f32) Rotor3 {
         return (Rotor3{
             .dot = w,
             .wedge = BiVec3{
-                .yz = y,
-                .zx = -z, // quaternions effectively use xz, and zx = -xz
-                .xy = x,
+                .yz = -x,
+                .zx = -y,
+                .xy = -z,
             },
         }).standardize();
     }
@@ -319,10 +326,17 @@ pub const Rotor3 = extern struct {
 
     /// Composes two rotors into one that applies b first then a.
     pub fn preMul(a: Rotor3, b: Rotor3) Rotor3 {
-        // TODO make sure this is the correct direction.
         return Rotor3{
-            .dot = a.dot * b.dot + a.wedge.dot(b.wedge),
-            .wedge = a.wedge.scale(b.dot).add(b.wedge.scale(a.dot)).add(a.wedge.wedge(b.wedge)),
+            .dot = a.dot * b.dot + b.wedge.dot(a.wedge),
+            .wedge = b.wedge.scale(a.dot).add(a.wedge.scale(b.dot)).add(b.wedge.wedge(a.wedge)),
+        };
+    }
+
+    /// Returns a rotor that rotates the same amount in the opposite direction.
+    pub fn reverse(r: Rotor3) Rotor3 {
+        return Rotor3{
+            .dot = r.dot,
+            .wedge = r.wedge.negate(),
         };
     }
 
@@ -495,4 +509,109 @@ test "Rotor3.diffVec" {
     expectNear(Identity, try Rotor3.diffVec(Vec3.X, Vec3.X), epsilon);
     expectNear(Identity, try Rotor3.diffVec(Vec3.Y, Vec3.Y), epsilon);
     expectNear(Identity, try Rotor3.diffVec(Vec3.Z, Vec3.Z), epsilon);
+
+    expectNear(Rotor3.init(0, 0, -1, 0), try Rotor3.diffVec(Vec3.X, Vec3.X.negate()), epsilon);
+    expectNear(Rotor3.init(0, 0, 0, 1), try Rotor3.diffVecAlong(Vec3.X, Vec3.X.negate(), BiVec3.XY), epsilon);
+    expectNear(Rotor3.init(0, 0, 0, -1), try Rotor3.diffVecAlong(Vec3.X, Vec3.X.negate(), BiVec3.XY.negate()), epsilon);
+    expectNear(Rotor3.init(0, 0, -1, 0), try Rotor3.diffVecAlong(Vec3.X, Vec3.X.negate(), BiVec3.ZX.negate()), epsilon);
+
+    testing.expectError(error.Singular, Rotor3.diffVecAlong(Vec3.X, Vec3.X.negate(), BiVec3.YZ.negate()));
+
+    const isqrt2 = 1.0 / math.sqrt(2.0);
+    expectNear(Rotor3.init(isqrt2, 0, 0, isqrt2), try Rotor3.diffVec(Vec3.X, Vec3.Y), epsilon);
+    expectNear(Rotor3.init(isqrt2, 0, 0, isqrt2), try Rotor3.diffVec(Vec3.X.scale(5), Vec3.Y.scale(10)), epsilon);
+    expectNear(Rotor3.init(isqrt2, 0, -isqrt2, 0), try Rotor3.diffVec(Vec3.X, Vec3.Z), epsilon);
+}
+
+test "Rotor3.halfway" {
+    const epsilon = 1e-5;
+    const rotor = try Rotor3.init(1, 2, -3, 4).normalize();
+    var half = rotor.halfway();
+
+    const vec = Vec3.init(4, -2, 12);
+    const rotated = rotor.apply(vec);
+    const hrotated = half.apply(half.apply(vec));
+    Vec3.expectNear(rotated, hrotated, epsilon);
+
+    var c: u32 = 0;
+    while (c < 32) : (c += 1) {
+        half = half.halfway();
+    }
+    Rotor3.expectNear(Rotor3.Identity, half, epsilon);
+}
+
+test "Rotor3.apply" {
+    const epsilon = 1e-5;
+    const Identity = Rotor3.Identity;
+    const expectNear = Rotor3.expectNear;
+    const isqrt2 = 1.0 / math.sqrt(2.0);
+
+    var rotor = Rotor3.init(isqrt2, 0, 0, isqrt2);
+    Vec3.expectNear(Vec3.Y, rotor.apply(Vec3.X), epsilon);
+}
+
+test "Rotor3.diffFrame" {
+    const epsilon = 1e-5;
+    const expectNear = Rotor3.expectNear;
+    const rotor = try Rotor3.diffFrame(
+        Vec3.init(4, 0, 0),
+        Vec3.init(-0.5, 0, 1),
+        Vec3.init(0, 0.25, 0),
+        Vec3.init(1, 0.5, 0),
+    );
+    Vec3.expectNear(Vec3.Y, rotor.apply(Vec3.X), epsilon);
+    Vec3.expectNear(Vec3.Y.add(Vec3.X), rotor.apply(Vec3.X.add(Vec3.Z)), epsilon);
+}
+
+fn randRotor3(rnd: *std.rand.Random) Rotor3 {
+    return Rotor3.init(
+        rnd.float(f32) * 2 - 1,
+        rnd.float(f32) * 2 - 1,
+        rnd.float(f32) * 2 - 1,
+        rnd.float(f32) * 2 - 1,
+    ).standardize().normalize() catch Rotor3.Identity;
+}
+
+fn randVec3(rnd: *std.rand.Random) Vec3 {
+    return Vec3.init(
+        rnd.float(f32) * 4 - 2,
+        rnd.float(f32) * 4 - 2,
+        rnd.float(f32) * 4 - 2,
+    );
+}
+
+test "Rotor3.diff" {
+    const epsilon = 1e-5;
+    var bigRnd = std.rand.DefaultPrng.init(42);
+    const rnd = &bigRnd.random;
+
+    var i = u32(0);
+    while (i < 10) : (i += 1) {
+        const a = randRotor3(rnd);
+        const b = randRotor3(rnd);
+        const diff = a.diff(b);
+        const recombined = diff.preMul(a);
+        Rotor3.expectNear(b, recombined, epsilon);
+        var j = u32(0);
+        while (j < 10) : (j += 1) {
+            const vec = randVec3(rnd);
+            Vec3.expectNear(b.apply(vec), diff.apply(a.apply(vec)), epsilon);
+        }
+    }
+}
+
+test "Rotor3.lerp" {
+    const epsilon = 1e-5;
+    var bigRnd = std.rand.DefaultPrng.init(42);
+    const rnd = &bigRnd.random;
+    var i = u32(0);
+    while (i < 10) : (i += 1) {
+        const a = randRotor3(rnd);
+        const b = randRotor3(rnd);
+        const halfDiff = a.diff(b).halfway().preMul(a);
+        const slerp = a.slerp(b, 0.5);
+        const nlerp = try a.nlerp(b, 0.5);
+        Rotor3.expectNear(slerp, nlerp, epsilon);
+        Rotor3.expectNear(slerp, halfDiff, epsilon);
+    }
 }

@@ -134,7 +134,7 @@ pub const Vec2 = extern struct {
     /// Equivalent to the projection of self along other.left().
     /// This is sometimes referred to as the rejection.
     /// If other is near zero, returns error.Singular.
-    pub inline fn across(self: Vec2, other: Vec2) !Vec2 {
+    pub fn across(self: Vec2, other: Vec2) !Vec2 {
         const mult = self.wedge(other) / other.lenSquared();
         if (!math.isFinite(mult)) return error.Singular;
         return other.scale(mult);
@@ -214,6 +214,20 @@ pub const Vec2 = extern struct {
     /// Concatenates two Vec2s into a Vec4
     pub inline fn pack4(xy: Vec2, zw: Vec2) Vec4 {
         return Vec4.init(xy.x, xy.y, zw.x, zw.y);
+    }
+
+    pub fn expectNear(expected: Vec2, actual: Vec2, epsilon: f32) void {
+        if (!math.approxEq(f32, expected.x, actual.x, epsilon) or
+            !math.approxEq(f32, expected.y, actual.y, epsilon))
+        {
+            std.debug.panic(
+                "Expected Vec2({}, {}), found Vec2({}, {})",
+                expected.x,
+                expected.y,
+                actual.x,
+                actual.y,
+            );
+        }
     }
 };
 
@@ -353,7 +367,7 @@ pub const Vec3 = extern struct {
     }
 
     /// Computes the cross product of two vectors
-    pub inline fn cross(self: Vec3, other: Vec3) Vec3 {
+    pub fn cross(self: Vec3, other: Vec3) Vec3 {
         return Vec3{
             .x = self.y * other.z - self.z * other.y,
             .y = self.z * other.x - self.x * other.z,
@@ -369,12 +383,10 @@ pub const Vec3 = extern struct {
         return if (math.isFinite(mult)) other.scale(mult) else Zero;
     }
 
-    /// Computes the projection of self across other.
-    /// This is sometimes referred to as the rejection.
+    /// Computes the rejection of self along other.
     /// If other is near zero, returns error.Singular.
-    pub inline fn across(self: Vec3, other: Vec3) !Vec3 {
-        // TODO How does this work in 3D?
-        return error.Singular;
+    pub fn across(self: Vec3, other: Vec3) !Vec3 {
+        return self.sub(try self.along(other));
     }
 
     /// Returns a vector that is orthogonal to this vector
@@ -433,8 +445,25 @@ pub const Vec3 = extern struct {
     /// This is the bivector normal to this vector with area
     /// equal to the length of this vector.  This is equal
     /// to this vector times the unit trivector.
-    pub inline fn toBiVec3(self: Vec3) BiVec3 {
+    pub fn toBiVec3(self: Vec3) BiVec3 {
         return @bitCast(BiVec3, self);
+    }
+
+    pub fn expectNear(expected: Vec3, actual: Vec3, epsilon: f32) void {
+        if (!math.approxEq(f32, expected.x, actual.x, epsilon) or
+            !math.approxEq(f32, expected.y, actual.y, epsilon) or
+            !math.approxEq(f32, expected.z, actual.z, epsilon))
+        {
+            std.debug.panic(
+                "Expected Vec3({}, {}, {}), found Vec3({}, {}, {})",
+                expected.x,
+                expected.y,
+                expected.z,
+                actual.x,
+                actual.y,
+                actual.z,
+            );
+        }
     }
 };
 
@@ -600,13 +629,19 @@ pub const Vec4 = extern struct {
         return other.scale(mult);
     }
 
+    /// Computes the rejection of self along other.
+    /// If other is too close to zero, returns error.Singular.
+    pub fn across(self: Vec4, other: Vec4) !Vec4 {
+        return self.sub(try self.along(other));
+    }
+
     /// Returns a pointer to the vector's data as a fixed-size buffer.
-    pub inline fn asBuf(self: *Vec4) *[4]f32 {
+    pub fn asBuf(self: *Vec4) *[4]f32 {
         return @ptrCast(*[4]f32, self);
     }
 
     /// Returns a pointer to the vector's data as a const fixed-size buffer.
-    pub inline fn asConstBuf(self: *const Vec4) *const [4]f32 {
+    pub fn asConstBuf(self: *const Vec4) *const [4]f32 {
         return @ptrCast(*const [4]f32, self);
     }
 
@@ -642,6 +677,26 @@ pub const Vec4 = extern struct {
     /// Returns a vec3 of the xyz components of this vector
     pub inline fn toVec3(self: Vec4) Vec3 {
         return Vec3.init(self.x, self.y, self.z);
+    }
+
+    pub fn expectNear(expected: Vec4, actual: Vec4, epsilon: f32) void {
+        if (!math.approxEq(f32, expected.x, actual.x, epsilon) or
+            !math.approxEq(f32, expected.y, actual.y, epsilon) or
+            !math.approxEq(f32, expected.z, actual.z, epsilon) or
+            !math.approxEq(f32, expected.w, actual.w, epsilon))
+        {
+            std.debug.panic(
+                "Expected Vec4({}, {}, {}, {}), found Vec4({}, {}, {}, {})",
+                expected.x,
+                expected.y,
+                expected.z,
+                expected.w,
+                actual.x,
+                actual.y,
+                actual.z,
+                actual.w,
+            );
+        }
     }
 };
 
@@ -686,7 +741,7 @@ pub const BiVec3 = extern struct {
 
     /// Reverse the orientation of the bivector without
     /// changing its magnitude.
-    pub inline fn negate(self: BiVec3) BiVec3 {
+    pub fn negate(self: BiVec3) BiVec3 {
         return BiVec3{
             .yz = -self.yz,
             .zx = -self.zx,
@@ -724,8 +779,14 @@ pub const BiVec3 = extern struct {
         return @bitCast(Vec3, self).cross(other);
     }
 
+    /// Returns the vec projected onto this plane.
+    /// If this plane is near zero, returns error.Singular.
+    pub inline fn project(plane: BiVec3, vec: Vec3) !Vec3 {
+        return try vec.across(@bitCast(Vec3, plane));
+    }
+
     /// Multiply each component by a constant
-    pub inline fn scale(self: BiVec3, multiple: f32) BiVec3 {
+    pub fn scale(self: BiVec3, multiple: f32) BiVec3 {
         return BiVec3{
             .yz = self.yz * multiple,
             .zx = self.zx * multiple,
@@ -735,7 +796,7 @@ pub const BiVec3 = extern struct {
 
     /// Normalize this vec. Returns error.Singular if
     /// this is the zero bivector.
-    pub inline fn normalize(self: BiVec3) !BiVec3 {
+    pub fn normalize(self: BiVec3) !BiVec3 {
         return (try self.toVec3().normalize()).toBiVec3();
     }
 
@@ -769,6 +830,23 @@ pub const BiVec3 = extern struct {
     /// x maps to yz, y maps to zx, z maps to xy.
     pub inline fn toVec3(self: BiVec3) Vec3 {
         return @bitCast(Vec3, self);
+    }
+
+    pub fn expectNear(expected: BiVec3, actual: BiVec3, epsilon: f32) void {
+        if (!math.approxEq(f32, expected.yz, actual.yz, epsilon) or
+            !math.approxEq(f32, expected.zx, actual.zx, epsilon) or
+            !math.approxEq(f32, expected.xy, actual.xy, epsilon))
+        {
+            std.debug.panic(
+                "Expected BiVec3({}, {}, {}), found BiVec3({}, {}, {})",
+                expected.yz,
+                expected.zx,
+                expected.xy,
+                actual.yz,
+                actual.zx,
+                actual.xy,
+            );
+        }
     }
 };
 
