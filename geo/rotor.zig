@@ -301,6 +301,35 @@ pub const Rotor3 = extern struct {
         }).standardize();
     }
 
+    pub fn fromMatrix(m: var) Rotor3 {
+        var result: Rotor3 = undefined;
+        var trace: f32 = undefined;
+        if (m.z.z < 0) {
+            if (m.x.x > m.y.y) {
+                trace = 1 + m.x.x - m.y.y - m.z.z;
+                result = Rotor3.init(m.y.z - m.z.y, trace, m.x.y + m.y.x, m.z.x + m.x.z);
+            } else {
+                trace = 1 - m.x.x + m.y.y - m.z.z;
+                result = Rotor3.init(m.z.x - m.x.z, m.x.y + m.y.x, trace, m.y.z + m.z.y);
+            }
+        } else {
+            if (m.x.x < -m.y.y) {
+                trace = 1 - m.x.x - m.y.y + m.z.z;
+                result = Rotor3.init(m.x.y - m.y.x, m.z.x + m.x.z, m.y.z + m.z.y, trace);
+            } else {
+                trace = 1 + m.x.x + m.y.y + m.z.z;
+                result = Rotor3.init(trace, m.y.z - m.z.y, m.z.x - m.x.z, m.x.y - m.y.x);
+            }
+        }
+
+        var mult = 0.5 / math.sqrt(trace);
+        // ensure dot ends up positive to standardize the rotation
+        mult = math.copysign(f32, mult, result.dot);
+        result.dot *= mult;
+        result.wedge = result.wedge.scale(mult);
+        return result;
+    }
+
     /// Normalizes the rotor to unit length.
     /// Rotors should stay normalized most of the time.
     pub fn normalize(self: Rotor3) !Rotor3 {
