@@ -3,6 +3,7 @@ const math = std.math;
 
 usingnamespace @import("vec.zig");
 usingnamespace @import("rotor.zig");
+usingnamespace @import("xform.zig");
 
 /// A 3x3 matrix.  When required to choose, this library uses
 /// the column-major convention.
@@ -56,22 +57,6 @@ pub const Mat3 = extern struct {
             .x = l.x.scale(r),
             .y = l.y.scale(r),
             .z = l.z.scale(r),
-        };
-    }
-
-    pub fn extractPreScale(self: Mat3) Vec3 {
-        return Vec3{
-            .x = self.x.len(),
-            .y = self.y.len(),
-            .z = self.z.len(),
-        };
-    }
-
-    pub fn extractPreScaleSquared(self: Mat3) Vec3 {
-        return Vec3{
-            .x = self.x.lenSquared(),
-            .y = self.y.lenSquared(),
-            .z = self.z.lenSquared(),
         };
     }
 
@@ -812,6 +797,22 @@ pub const Generic = struct {
         };
     }
 
+    pub fn preScaleMat3Vec(l: var, r: Vec3) Mat3 {
+        return Mat3{
+            .x = Vec3.init(l.x.x, l.x.y, l.x.z).scale(r.x),
+            .y = Vec3.init(l.y.x, l.y.y, l.z.z).scale(r.y),
+            .z = Vec3.init(l.z.x, l.z.y, l.z.z).scale(r.z),
+        };
+    }
+
+    pub fn postScaleMat3Vec(l: var, r: Vec3) Mat3 {
+        return Mat3{
+            .x = Vec3.init(l.x.x, l.x.y, l.x.z).mul(r),
+            .y = Vec3.init(l.y.x, l.y.y, l.z.z).mul(r),
+            .z = Vec3.init(l.z.x, l.z.y, l.z.z).mul(r),
+        };
+    }
+
     pub fn postRotateMat3(l: var, r: Rotor3) Mat3 {
         return Mat3{
             .x = @inlineCall(Rotor3.apply, r, Vec3.init(l.x.x, l.x.y, l.x.z)),
@@ -861,6 +862,65 @@ pub const Generic = struct {
         dest.w.y = src.w.y;
         dest.w.z = src.w.z;
     }
+
+    pub inline fn extractPreScale3NoFlip(m: var) Vec3 {
+        return Vec3{
+            .x = Vec3.init(m.x.x, m.x.y, m.x.z).len(),
+            .y = Vec3.init(m.y.x, m.y.y, m.y.z).len(),
+            .z = Vec3.init(m.z.x, m.z.y, m.z.z).len(),
+        };
+    }
+
+    pub inline fn extractPreScale3(m: var) Vec3 {
+        var scale = extractPreScale3NoFlip(m);
+        scale.x = math.copysign(determinant3x3(m), scale.x);
+    }
+
+    pub fn extractTransform3x3(m: var) Transform3 {
+        var scale = extractPreScale3NoFlip(m);
+        const invScale = Vec3.init(1 / scale.x, 1 / scale.y, 1 / scale.z);
+        var unit = postScaleMat3Vec(m, invScale);
+        const det = determinant3x3(unit);
+
+        // If the determinant is not approx 1, this matrix has shear and
+        // we cannot decompose it.
+        assert(math.approxEq(f32, 1, math.fabs(det), 1e-4));
+
+        if (det < 0) {
+            // this matrix inverts chirality.  Flip a scale and one of the matrix bases.
+            scale.x = -scale.x;
+            unit.x = unit.x.negate();
+        }
+
+        return Transform3{
+            .rotation = Rotor3.fromMatrix(unit),
+            .translation = Vec3.Zero,
+            .scale = scale,
+        };
+    }
+
+    pub fn extractTransform4x3(m: var) Transform3 {
+        var scale = extractPreScale3NoFlip(m);
+        const invScale = Vec3.init(1 / scale.x, 1 / scale.y, 1 / scale.z);
+        var unit = postScaleMat3Vec(m, invScale);
+        const det = determinant3x3(unit);
+
+        // If the determinant is not approx 1, this matrix has shear and
+        // we cannot decompose it.
+        assert(math.approxEq(f32, 1, math.fabs(det), 1e-4));
+
+        if (det < 0) {
+            // this matrix inverts chirality.  Flip a scale and one of the matrix bases.
+            scale.x = -scale.x;
+            unit.x = unit.x.negate();
+        }
+
+        return Transform3{
+            .rotation = Rotor3.fromMatrix(unit),
+            .translation = Vec3.init(m.w.x, m.w.y, m.w.z),
+            .scale = scale,
+        };
+    }
 };
 
 test "compile Mat3" {
@@ -875,8 +935,6 @@ test "compile Mat3" {
     _ = a.preScaleVec(Vec3.X);
     _ = a.postScaleVec(Vec3.Y);
     _ = a.scale(4);
-    _ = a.extractPreScale();
-    _ = a.extractPreScaleSquared();
     _ = a.preRotate(Rotor3.Identity);
     _ = a.postRotate(Rotor3.Identity);
     _ = a.mulVec(Vec3.Z);
