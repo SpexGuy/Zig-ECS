@@ -3,7 +3,6 @@ const AtomicOrder = builtin.AtomicOrder;
 const std = @import("std");
 const expect = std.testing.expect;
 const assert = std.debug.assert;
-const SpinLock = std.SpinLock;
 
 /// an InstantQueue is a threadsafe queue with a fixed-size buffer.
 /// It is guaranteed never to sleep the thread.
