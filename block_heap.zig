@@ -267,7 +267,7 @@ pub const BlockHeap = struct {
 
     fn freeBlock(self: Self, ptrInBlock: [*]u8) void {
         const address = @ptrToInt(ptrInBlock);
-        const headerAddress = address & ~(usize(dataPageSize) - 1);
+        const headerAddress = address & ~(@as(usize, dataPageSize) - 1);
         const page = @intToPtr(*DataPage, headerAddress);
         switch (page.header.canary) {
             dataPageCanary => {

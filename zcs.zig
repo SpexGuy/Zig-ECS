@@ -32,7 +32,7 @@ var lowMemory = false;
 
 /// Creates a ZCS type for the given set of components.
 /// This file should be used via this syntax:
-/// const ZCS = @import("zcs.zig").Schema([_]type{
+/// const ZCS = @import("zcs.zig").Schema(&[_]type{
 ///     // component types go here
 /// });
 pub fn Schema(comptime componentTypes: []const type) type {
@@ -80,7 +80,7 @@ pub fn Schema(comptime componentTypes: []const type) type {
         fn resolveItem(self: Self, index: u32) error{InvalidID}!Item {
             const chunkID = index / chunkLayout.numItems;
             const indexInChunk = index % chunkLayout.numItems;
-            if (chunkID >= self.chunks.count()) return error.InvalidID;
+            if (chunkID >= self.chunks.items.len) return error.InvalidID;
             return Item{
                 .chunk = self.chunks.at(chunkID),
                 .index = indexInChunk,
@@ -120,7 +120,7 @@ pub fn Schema(comptime componentTypes: []const type) type {
         fn resolveItem(self: Self, index: u32) error{InvalidID}!Item {
             const chunkID = index / chunkLayout.numItems;
             const indexInChunk = index % chunkLayout.numItems;
-            if (chunkID >= self.chunks.count()) return error.InvalidID;
+            if (chunkID >= self.chunks.items.len) return error.InvalidID;
             return Item{
                 .chunk = self.chunks.at(chunkID),
                 .index = indexInChunk,
@@ -159,7 +159,7 @@ pub fn Schema(comptime componentTypes: []const type) type {
         fn resolveItem(self: Self, index: u32) error{InvalidID}!Item {
             const chunkID = index / chunkLayout.layout.numItems;
             const indexInChunk = index % chunkLayout.layout.numItems;
-            if (chunkID >= self.chunks.count()) return error.InvalidID;
+            if (chunkID >= self.chunks.items.len) return error.InvalidID;
             return Item{
                 .chunk = self.chunks.at(chunkID),
                 .index = indexInChunk,
@@ -251,7 +251,7 @@ fn ZCS(
         }
 
         pub fn shutdown(self: *Self) void {
-            warn("shutting down ZCS\n");
+            warn("shutting down ZCS\n", .{});
             self.jobSystem.shutdown();
         }
 
@@ -264,7 +264,7 @@ fn ZCS(
         }
 
         pub fn forEntitiesWithDep(self: *Self, comptime func: var, dep: JobID) JobID {
-            return self.forEntitiesExcludeWithDeps(0, func, [_]JobID{dep});
+            return self.forEntitiesExcludeWithDeps(0, func, &[_]JobID{dep});
         }
 
         pub fn forEntitiesWithDeps(self: *Self, comptime func: var, deps: []const JobID) JobID {
@@ -272,11 +272,11 @@ fn ZCS(
         }
 
         pub fn forEntitiesExcludeWithDep(self: *Self, excludeMask: ArchMask, comptime func: var, dep: JobID) JobID {
-            return self.forEntitiesExcludeWithDeps(excludeMask, func, [_]JobID{dep});
+            return self.forEntitiesExcludeWithDeps(excludeMask, func, &[_]JobID{dep});
         }
 
         pub fn forEntitiesExcludeWithDeps(self: *Self, excludeMask: ArchMask, comptime func: var, deps: []const JobID) JobID {
-            const FuncType = @typeOf(func);
+            const FuncType = @TypeOf(func);
 
             // Get the type of the second argument to func
             const ComponentStruct = switch (@typeInfo(FuncType)) {
@@ -296,7 +296,7 @@ fn ZCS(
 
             const Codegen = struct {
                 fn dataAdapter(_: util.EmptyStruct, data: ComponentStruct) void {
-                    @inlineCall(func, data);
+                    @call(.{ .modifier = .always_inline }, func, .{data});
                 }
             };
 
@@ -312,7 +312,7 @@ fn ZCS(
         }
 
         pub fn forEntitiesWithDataWithDep(self: *Self, data: var, comptime func: var, dep: JobID) JobID {
-            return self.forEntitiesWithDataExcludeWithDeps(0, data, func, [_]JobID{dep});
+            return self.forEntitiesWithDataExcludeWithDeps(0, data, func, &[_]JobID{dep});
         }
 
         pub fn forEntitiesWithDataWithDeps(self: *Self, data: var, comptime func: var, deps: []const JobID) JobID {
@@ -320,12 +320,12 @@ fn ZCS(
         }
 
         pub fn forEntitiesWithDataExcludeWithDep(self: *Self, excludeMask: ArchMask, data: var, comptime func: var, dep: JobID) JobID {
-            return self.forEntitiesWithDataExcludeWithDeps(excludeMask, data, func, [_]JobID{dep});
+            return self.forEntitiesWithDataExcludeWithDeps(excludeMask, data, func, &[_]JobID{dep});
         }
 
         pub fn forEntitiesWithDataExcludeWithDeps(self: *Self, excludeMask: ArchMask, data: var, comptime func: var, deps: []const JobID) JobID {
-            const ExtraData = @typeOf(data);
-            const FuncType = @typeOf(func);
+            const ExtraData = @TypeOf(data);
+            const FuncType = @TypeOf(func);
 
             // Get the type of the second argument to func
             const ComponentStruct = switch (@typeInfo(FuncType)) {
@@ -422,7 +422,7 @@ fn ZCS(
                             const typedPtr = @ptrCast([*]field.field_type.Child, @alignCast(@alignOf(field.field_type.Child), componentPtrs[i]));
                             @field(components, field.name) = &typedPtr[i];
                         }
-                        @inlineCall(func, jobData.data, components);
+                        @call(.{ .modifier = .always_inline }, func, .{ jobData.data, components });
                     }
                 }
             };
@@ -491,7 +491,7 @@ test "Masks" {
         }
     };
 
-    const ECS = Schema([_]type{ Position, Velocity, Acceleration, GravityTag, DampenTag });
+    const ECS = Schema(&[_]type{ Position, Velocity, Acceleration, GravityTag, DampenTag });
     const TypeIndex = ECS.TypeIndex;
 
     assert(ECS.ArchMask == u8);
@@ -501,16 +501,16 @@ test "Masks" {
     assert(TypeIndex.getComponentBit(GravityTag) == 8);
     assert(TypeIndex.getComponentBit(GravityTag2) == 8);
     assert(TypeIndex.getComponentBit(DampenTag) == 16);
-    assert(TypeIndex.getArchMask([_]type{ Position, Velocity, GravityTag }) == 11);
+    assert(TypeIndex.getArchMask(&[_]type{ Position, Velocity, GravityTag }) == 11);
 
-    warn("\nLaid out chunks:\n");
-    warn("Entity {}\n", ECS.EntityManager.chunkLayout.layout.numItems);
-    warn("Arch    {}\n", ECS.ArchetypeManager.chunkLayout.layout.numItems);
-    warn("Data    {}\n", ECS.DataManager.chunkLayout.layout.numItems);
+    warn("\nLaid out chunks:\n", .{});
+    warn("Entity {}\n", .{ECS.EntityManager.chunkLayout.layout.numItems});
+    warn("Arch    {}\n", .{ECS.ArchetypeManager.chunkLayout.layout.numItems});
+    warn("Data    {}\n", .{ECS.DataManager.chunkLayout.layout.numItems});
 
     var ecs = ECS.init();
     try ecs.startJobSystem(0);
-    const accVelJob = ecs.forEntitiesWithData(f32(0.016666), Jobs.accVel);
+    const accVelJob = ecs.forEntitiesWithData(@as(f32, 0.016666), Jobs.accVel);
     _ = ecs.forEntitiesWithDep(Jobs.resetAcc, accVelJob);
     ecs.shutdown();
 

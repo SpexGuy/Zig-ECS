@@ -68,11 +68,11 @@ pub fn testAllocatorLargeAlignment(allocator: *mem.Allocator) mem.Allocator.Erro
     //  very near usize?
     if (mem.page_size << 2 > math.maxInt(usize)) return;
 
-    const USizeShift = @IntType(false, math.log2(usize.bit_count));
-    const large_align = u29(mem.page_size << 2);
+    const USizeShift = std.meta.IntType(false, math.log2(usize.bit_count));
+    const large_align = @as(u29, mem.page_size << 2);
 
     var align_mask: usize = undefined;
-    _ = @shlWithOverflow(usize, ~usize(0), USizeShift(@ctz(u29, large_align)), &align_mask);
+    _ = @shlWithOverflow(usize, ~@as(usize, 0), @as(USizeShift, @ctz(u29, large_align)), &align_mask);
 
     var slice = try allocator.alignedAlloc(u8, large_align, 500);
     testing.expect(@ptrToInt(slice.ptr) & align_mask == @ptrToInt(slice.ptr));

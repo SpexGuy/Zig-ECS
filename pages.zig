@@ -2,7 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const math = std.math;
 const mem = std.mem;
-const page_allocator = std.heap.direct_allocator;
+const page_allocator = std.heap.page_allocator;
 const util = @import("util.zig");
 
 // @todo: This API has a big cache associativity problem that will

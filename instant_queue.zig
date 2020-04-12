@@ -29,7 +29,7 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
         pub fn init() Self {
             return Self{
                 .frontHeadBackTail = N - 1,
-                .frontTailBackHead = u64(N - 1) << 32,
+                .frontTailBackHead = @as(u64, N - 1) << 32,
                 .buffer = undefined,
             };
         }
@@ -97,7 +97,7 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
                     nextHead = head + 1;
                     if (nextHead == N) nextHead = 0;
 
-                    const nextFhbt = (u64(nextHead) << 32) | tail;
+                    const nextFhbt = (@as(u64, nextHead) << 32) | tail;
 
                     // cmpxchg next head
                     if (@cmpxchgWeak(u64, &self.frontHeadBackTail, fhbt, nextFhbt, .SeqCst, .SeqCst)) |actualVal| {
@@ -116,8 +116,8 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
             {
                 var ftbh = @atomicLoad(u64, &self.frontTailBackHead, .SeqCst);
                 while (true) {
-                    const lastFtbh = (ftbh & ~u64(0xFFFFFFFF)) | head;
-                    const nextFtbh = (ftbh & ~u64(0xFFFFFFFF)) | nextHead;
+                    const lastFtbh = (ftbh & ~@as(u64, 0xFFFFFFFF)) | head;
+                    const nextFtbh = (ftbh & ~@as(u64, 0xFFFFFFFF)) | nextHead;
                     if (@cmpxchgWeak(u64, &self.frontTailBackHead, lastFtbh, nextFtbh, .SeqCst, .SeqCst)) |actualVal| {
                         ftbh = actualVal;
                     } else {
@@ -158,7 +158,7 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
                             return error.QueueEmpty;
                         }
 
-                        const nextFtbh = (u64(tail) << 32) | head;
+                        const nextFtbh = (@as(u64, tail) << 32) | head;
 
                         // cmpxchg next head
                         if (@cmpxchgWeak(u64, &self.frontTailBackHead, ftbh, nextFtbh, .SeqCst, .SeqCst)) |actualVal| {
@@ -177,8 +177,8 @@ pub fn InstantQueue(comptime T: type, comptime MaxSize: u32) type {
                 {
                     var fhbt = @atomicLoad(u64, &self.frontHeadBackTail, .SeqCst);
                     while (true) {
-                        const lastFhbt = (fhbt & ~u64(0xFFFFFFFF)) | lastTail;
-                        const nextFhbt = (fhbt & ~u64(0xFFFFFFFF)) | tail;
+                        const lastFhbt = (fhbt & ~@as(u64, 0xFFFFFFFF)) | lastTail;
+                        const nextFhbt = (fhbt & ~@as(u64, 0xFFFFFFFF)) | tail;
                         if (@cmpxchgWeak(u64, &self.frontHeadBackTail, lastFhbt, nextFhbt, .SeqCst, .SeqCst)) |actualVal| {
                             fhbt = actualVal;
                         } else {
@@ -246,8 +246,8 @@ const puts_per_thread = 5000;
 const put_thread_count = 3;
 
 test "std.atomic.Queue" {
-    var plenty_of_memory = try std.heap.direct_allocator.alloc(u8, 300 * 1024);
-    defer std.heap.direct_allocator.free(plenty_of_memory);
+    var plenty_of_memory = try std.heap.page_allocator.alloc(u8, 300 * 1024);
+    defer std.heap.page_allocator.free(plenty_of_memory);
 
     var fixed_buffer_allocator = std.heap.ThreadSafeFixedBufferAllocator.init(plenty_of_memory);
     var a = &fixed_buffer_allocator.allocator;
@@ -297,16 +297,15 @@ test "std.atomic.Queue" {
     }
 
     if (context.get_count != puts_per_thread * put_thread_count) {
-        std.debug.panic(
-            "failure\nget_count:{} != puts_per_thread:{} * put_thread_count:{}",
+        std.debug.panic("failure\nget_count:{} != puts_per_thread:{} * put_thread_count:{}", .{
             context.get_count,
-            u32(puts_per_thread),
-            u32(put_thread_count),
-        );
+            @as(u32, puts_per_thread),
+            @as(u32, put_thread_count),
+        });
     }
 
     if (context.put_sum != context.get_sum) {
-        std.debug.panic("failure\nput_sum:{} != get_sum:{}", context.put_sum, context.get_sum);
+        std.debug.panic("failure\nput_sum:{} != get_sum:{}", .{ context.put_sum, context.get_sum });
     }
 }
 
@@ -316,7 +315,7 @@ fn startPuts(ctx: *Context) u8 {
     var fullCount: u24 = 0;
     while (put_count != 0) : (put_count -= 1) {
         std.time.sleep(1); // let the os scheduler be our fuzz
-        const x = @bitCast(i32, r.random.scalar(u32));
+        const x = @bitCast(i32, r.random.int(u32));
         while (true) {
             if (ctx.queue.enqueue(x)) {
                 _ = @atomicRmw(isize, &ctx.put_sum, builtin.AtomicRmwOp.Add, x, AtomicOrder.SeqCst);
@@ -324,7 +323,7 @@ fn startPuts(ctx: *Context) u8 {
             } else |err| {
                 fullCount +%= 1;
                 if (fullCount == 0) {
-                    std.debug.warn("queue full: {}\n", ctx.queue.*);
+                    std.debug.warn("queue full: {}\n", .{ctx.queue.*});
                 }
             }
         }
@@ -342,7 +341,7 @@ fn startGets(ctx: *Context) u8 {
             _ = @atomicRmw(usize, &ctx.get_count, builtin.AtomicRmwOp.Add, 1, builtin.AtomicOrder.SeqCst);
         } else |err| {
             emptyCount +%= 1;
-            if (emptyCount == 0) std.debug.warn("queue empty\n");
+            if (emptyCount == 0) std.debug.warn("queue empty\n", .{});
         }
 
         if (last) return 0;

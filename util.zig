@@ -9,7 +9,7 @@ pub fn typedSlice(comptime T: type, ptr: var, offset: usize, elemCount: usize) [
     return sliceStart[0..elemCount];
 }
 
-pub fn extractTypesFromUnion(comptime Type: type) [@memberCount(Type)]type {
+pub fn extractTypesFromUnion(comptime Type: type) []type {
     // ensure that the type is valid
     const info = @typeInfo(Type);
     switch (info) {
@@ -18,20 +18,20 @@ pub fn extractTypesFromUnion(comptime Type: type) [@memberCount(Type)]type {
     }
 
     // do the work
-    const num = @memberCount(Type);
-    comptime var types: [num]type = undefined;
-    inline for (types) |_, i| {
-        types[i] = @memberType(Type, i);
+    const fields = std.meta.fields(Type);
+    comptime var types: [fields.len]type = undefined;
+    inline for (fields) |field, i| {
+        types[i] = field.field_type;
     }
-    return types;
+    return &types;
 }
 
 pub fn roundUpToPowerOfTwo(x: u32) u32 {
-    return u32(1) << @truncate(u5, 32 - @clz(u32, x -% 1));
+    return @as(u32, 1) << @truncate(u5, 32 - @clz(u32, x -% 1));
 }
 
 pub fn emptySlice(comptime T: type) []T {
-    return ([*]T)(undefined)[0..0];
+    return &[0]T{};
 }
 
 pub fn isAlignedPtr(value: var, alignment: u29) bool {
@@ -68,7 +68,7 @@ pub fn adjustPtr(comptime T: type, ptr: var, offset: isize) [*]T {
 /// dereferenced, since dereferencing an unaligned pointer is UB.
 pub fn unsafePtrCast(comptime T: type, ptr: var) T {
     comptime {
-        assert(@sizeOf(T) == @sizeOf(@typeOf(ptr)));
+        assert(@sizeOf(T) == @sizeOf(@TypeOf(ptr)));
     }
     var result: T = undefined;
     @memcpy(@ptrCast([*]u8, &result), @ptrCast([*]const u8, &ptr), @sizeOf(T));

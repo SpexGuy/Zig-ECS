@@ -28,16 +28,16 @@ pub const JobInterface = struct {
     jobDesc: *JobSystem.JobDesc,
     jobID: JobID,
 
-    pub fn addSubJob(self: JobInterface, param: var, comptime func: fn (JobInterface, @typeOf(param)) void) JobID {
+    pub fn addSubJob(self: JobInterface, param: var, comptime func: fn (JobInterface, @TypeOf(param)) void) JobID {
         return self.addSubJobWithDeps(param, func, util.emptySlice(JobID));
     }
 
-    pub fn addSubJobWithDeps(self: JobInterface, param: var, comptime func: fn (JobInterface, @typeOf(param)) void, deps: []const JobID) JobID {
+    pub fn addSubJobWithDeps(self: JobInterface, param: var, comptime func: fn (JobInterface, @TypeOf(param)) void, deps: []const JobID) JobID {
         // @todo: This parent link opens up an opportunity for dependency cycles.
         // Such cycles will not be noticed until the entire system flushes.
         // We should add debug dependency cycle checks here.
         _ = self.jobDesc.dependencies.incr();
-        const T = @typeOf(param);
+        const T = @TypeOf(param);
         const rawFunc = adapterFunc(T, func);
         const job = self.jobSystem.obtainJob(rawFunc);
         self.jobSystem.setJobParam(job, param);
@@ -250,12 +250,12 @@ pub const JobSystem = struct {
         };
     };
 
-    pub fn schedule(self: *JobSystem, param: var, comptime func: fn (JobInterface, @typeOf(param)) void) JobID {
+    pub fn schedule(self: *JobSystem, param: var, comptime func: fn (JobInterface, @TypeOf(param)) void) JobID {
         return self.scheduleWithDeps(param, func, util.emptySlice(JobID));
     }
 
-    pub fn scheduleWithDeps(self: *JobSystem, param: var, comptime func: fn (JobInterface, @typeOf(param)) void, deps: []const JobID) JobID {
-        const T = @typeOf(param);
+    pub fn scheduleWithDeps(self: *JobSystem, param: var, comptime func: fn (JobInterface, @TypeOf(param)) void, deps: []const JobID) JobID {
+        const T = @TypeOf(param);
         const rawFunc = adapterFunc(T, func);
         const job = self.obtainJob(rawFunc);
         self.setJobParam(job, param);
@@ -298,7 +298,7 @@ pub const JobSystem = struct {
                 // look for a blank slot
                 for (job.permits.shortJobs) |*shortJob, i| {
                     if (shortJob.* == SHORT_JOB_INVALID) {
-                        if (DEBUG_PERMITS) warn("adding permit {} to {}[{}] ({})\n", permit, self.findShortJobID(job), i, getShortID(jobID));
+                        if (DEBUG_PERMITS) warn("adding permit {} to {}[{}] ({})\n", .{ permit, self.findShortJobID(job), i, getShortID(jobID) });
                         shortJob.* = permit;
                         lock.release();
                         return true;
@@ -311,7 +311,7 @@ pub const JobSystem = struct {
                     newJob = self.obtainExpansionSlotJob();
                     const newJobShortID = self.findShortJobID(newJob);
                     job.permits.expansion = newJobShortID;
-                    if (DEBUG_PERMITS) warn("adding expansion {} to {} ({})\n", newJobShortID, self.findShortJobID(job), getShortID(jobID));
+                    if (DEBUG_PERMITS) warn("adding expansion {} to {} ({})\n", .{ newJobShortID, self.findShortJobID(job), getShortID(jobID) });
                 } else {
                     newJob = self.getJobDescShort(job.permits.expansion);
                 }
@@ -363,7 +363,7 @@ pub const JobSystem = struct {
             },
             .External => {
                 var externalParam: []const u8 = undefined;
-                @memcpy(@ptrCast([*]u8, &externalParam), &job.paramData, @sizeOf(@typeOf(externalParam)));
+                @memcpy(@ptrCast([*]u8, &externalParam), &job.paramData, @sizeOf(@TypeOf(externalParam)));
                 job.func.?(interface, externalParam.ptr);
                 self.allocator.free(externalParam);
             },
@@ -378,17 +378,17 @@ pub const JobSystem = struct {
         var nextJob: u16 = SHORT_JOB_INVALID;
 
         const remainingDeps = job.dependencies.decr();
-        if (DEBUG_PERMITS) warn("release permits for {}, {} deps remain\n", jobID, remainingDeps - 1);
+        if (DEBUG_PERMITS) warn("release permits for {}, {} deps remain\n", .{ jobID, remainingDeps - 1 });
 
         if (remainingDeps == 1) {
             switch (job.state) {
                 .NotStarted => {
-                    if (DEBUG_PERMITS) warn("moving {} to .WaitingForChildren\n", jobID);
+                    if (DEBUG_PERMITS) warn("moving {} to .WaitingForChildren\n", .{jobID});
                     job.state = .WaitingForChildren;
                     nextJob = jobID;
                 },
                 .WaitingForChildren => {
-                    if (DEBUG_PERMITS) warn("freeing {}\n", jobID);
+                    if (DEBUG_PERMITS) warn("freeing {}\n", .{jobID});
                     var lock = job.lock.acquire();
                     const nextPermits = job.permits;
                     job.gen +%= 1;
@@ -430,7 +430,7 @@ pub const JobSystem = struct {
         // @todo: Use a semaphore here to avoid burning power
         while (self.state != .ShuttingDown) {
             if (self.readyToRunJobs.dequeue()) |shortID| {
-                if (DEBUG_RTR) warn("pulled from RTR: {}\n", shortID);
+                if (DEBUG_RTR) warn("pulled from RTR: {}\n", .{shortID});
                 return shortID;
             } else |err| {
                 continue;
@@ -445,7 +445,7 @@ pub const JobSystem = struct {
         var triesLeft = timeout;
         while (triesLeft > 0) : (triesLeft -= 1) {
             if (self.readyToRunJobs.dequeue()) |shortID| {
-                if (DEBUG_RTR) warn("pulled from RTR: {}\n", shortID);
+                if (DEBUG_RTR) warn("pulled from RTR: {}\n", .{shortID});
                 return shortID;
             } else |err| {
                 continue;
@@ -455,10 +455,10 @@ pub const JobSystem = struct {
     }
 
     fn addReadyToRunJob(self: *JobSystem, shortID: u16) void {
-        if (DEBUG_RTR) warn("add to RTR: {}\n", shortID);
+        if (DEBUG_RTR) warn("add to RTR: {}\n", .{shortID});
         // the RTR queue is big enough to hold all jobs, so we cannot fill it.
         self.readyToRunJobs.enqueue(shortID) catch {
-            warn("ERROR: self=\n{}\n", self.*);
+            warn("ERROR: self=\n{}\n", .{self.*});
             unreachable;
         };
     }
@@ -469,8 +469,8 @@ pub const JobSystem = struct {
 
     fn obtainExpansionSlotJob(self: *JobSystem) *JobDesc {
         const shortID = self.freeJobs.dequeue() catch {
-            warn("ERROR: self=\n{}\n", self.*);
-            std.debug.panic("No more jobs for an expansion slot!");
+            warn("ERROR: self=\n{}\n", .{self.*});
+            std.debug.panic("No more jobs for an expansion slot!", .{});
         };
 
         _ = self.expansionsAllocated.incr();
@@ -488,8 +488,8 @@ pub const JobSystem = struct {
 
     fn obtainJob(self: *JobSystem, func: RawJobFunc) *JobDesc {
         const shortID = self.freeJobs.dequeue() catch {
-            warn("ERROR: self=\n{}\n", self.*);
-            std.debug.panic("No more jobs!");
+            warn("ERROR: self=\n{}\n", .{self.*});
+            std.debug.panic("No more jobs!", .{});
         };
 
         const pending = self.pendingJobs.incr();
@@ -503,7 +503,7 @@ pub const JobSystem = struct {
     }
 
     fn setJobParam(self: *JobSystem, job: *JobDesc, param: var) void {
-        const T = @typeOf(param);
+        const T = @TypeOf(param);
         const size = @sizeOf(T);
         const alignment = @alignOf(T);
         if (size == 0) {
@@ -516,11 +516,11 @@ pub const JobSystem = struct {
             } else {
                 _ = self.externalAllocs.incr();
                 // allocate the new value
-                const slice = self.allocator.alignedAlloc(u8, alignment, size) catch std.debug.panic("Out of memory for job param!");
+                const slice = self.allocator.alignedAlloc(u8, alignment, size) catch std.debug.panic("Out of memory for job param!", .{});
                 // copy param data to the new allocation
                 @memcpy(slice.ptr, rawParam, size);
                 // copy slice data into job param
-                const sliceSize = @sizeOf(@typeOf(slice));
+                const sliceSize = @sizeOf(@TypeOf(slice));
                 comptime assert(sliceSize <= ParamInternalSize);
                 @memcpy(&job.paramData, @ptrCast([*]const u8, &slice), sliceSize);
                 job.paramPos = .External;
@@ -545,7 +545,7 @@ pub const JobSystem = struct {
     fn findJobIDUnpublished(self: *JobSystem, job: *JobDesc) JobID {
         const index = self.findShortJobID(job);
         const gen = job.gen;
-        const jobValue: u32 = (u32(gen) << 16) | index;
+        const jobValue: u32 = (@as(u32, gen) << 16) | index;
         return JobID{ .value = jobValue };
     }
 
@@ -570,7 +570,7 @@ pub const JobSystem = struct {
 
 test "job system" {
     const Timer = std.time.Timer;
-    const allocator = std.heap.direct_allocator;
+    const allocator = std.heap.page_allocator;
 
     var system = JobSystem.init(allocator);
     try system.startup(@intCast(u32, Thread.cpuCount() catch 4) - 1);
@@ -578,55 +578,55 @@ test "job system" {
     var timer = try Timer.start();
     var c: u32 = 0;
     while (c < 1000) : (c += 1) {
-        var print0 = system.schedule("In a job!"[0..], printJob);
-        var print1 = system.scheduleWithDeps("In job 2!"[0..], printJob, [_]JobID{print0});
-        _ = system.scheduleWithDeps("INVALID"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
-        _ = system.scheduleWithDeps("invalid"[0..], printSubJob, [_]JobID{print1});
+        var print0 = system.schedule(@as([]const u8, "In a job!"), printJob);
+        var print1 = system.scheduleWithDeps(@as([]const u8, "In job 2!"), printJob, &[_]JobID{print0});
+        _ = system.scheduleWithDeps(@as([]const u8, "INVALID"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
+        _ = system.scheduleWithDeps(@as([]const u8, "invalid"), printSubJob, &[_]JobID{print1});
         system.flush();
     }
     const elapsed = timer.read();
     system.shutdown();
 
     // std.debug.warn(
-    //     "\nProcessed {} tasks (peak {}, expansions {})\nTotal time: {}mS\nAvg time: {}nS\n",
+    //     "\nProcessed {} tasks (peak {}, expansions {})\nTotal time: {}mS\nAvg time: {}nS\n", .{
     //     system.jobsExecuted.get(),
     //     system.maxPendingJobs.get(),
     //     system.expansionsAllocated.get(),
     //     elapsed / 1000 / 1000,
     //     elapsed / system.jobsExecuted.get(),
-    // );
+    // });
 }
 
 fn printSubJob(job: JobInterface, str: []const u8) void {
     const SubJob = struct {
         fn exec(_: JobInterface, char: u8) void {
-            //std.debug.warn("{c} ", char);
+            //std.debug.warn("{c} ", .{char});
         }
         fn finish(_: JobInterface, param: util.EmptyStruct) void {
-            //std.debug.warn("\n");
+            //std.debug.warn("\n", .{});
         }
     };
 
     var chain = JobID.Invalid;
     for (str) |char| {
-        chain = job.addSubJobWithDeps(char, SubJob.exec, [_]JobID{chain});
+        chain = job.addSubJobWithDeps(char, SubJob.exec, &[_]JobID{chain});
     }
-    _ = job.addSubJobWithDeps(util.EmptyStruct{}, SubJob.finish, [_]JobID{chain});
+    _ = job.addSubJobWithDeps(util.EmptyStruct{}, SubJob.finish, &[_]JobID{chain});
 }
 
 fn printJob(job: JobInterface, str: []const u8) void {
-    //std.debug.warn("{}\n", str);
+    //std.debug.warn("{}\n", .{str});
 }

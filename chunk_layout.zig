@@ -90,7 +90,7 @@ pub fn SOASchema(comptime InHeader: type, comptime InValueUnion: type) type {
             assert(util.isPowerOfTwo(inChunkSize));
             assert(inChunkSize > @sizeOf(InHeader));
 
-            const staticLayout = layoutStaticChunk(inChunkSize, @sizeOf(InHeader), layouts);
+            const staticLayout = layoutStaticChunk(inChunkSize, @sizeOf(InHeader), &layouts);
 
             return Self{
                 .chunkSize = inChunkSize,
@@ -201,7 +201,7 @@ test "static chunk layout" {
     });
     const chunkLayout = LinkedChunkSchema.layout(chunkSize);
     // @todo this technically works but we should specify alignment and size properly here.
-    const chunk = try std.heap.direct_allocator.create(LinkedChunkSchema.Chunk);
+    const chunk = try std.heap.page_allocator.create(LinkedChunkSchema.Chunk);
     chunk.header.next = &chunk.header;
 
     const longs = chunkLayout.getValues(chunk, .First);

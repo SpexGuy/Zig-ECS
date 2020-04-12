@@ -4,5 +4,5 @@ const warn = std.debug.warn;
 const z = @import("zcs.zig");
 
 test "first_test" {
-    z.doStuff();
+    //z.doStuff();
 }
